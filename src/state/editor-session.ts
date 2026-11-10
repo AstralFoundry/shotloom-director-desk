@@ -121,8 +121,8 @@ export class EditorSession {
                 ),
             () => this.apply({ dirty: false, status: '自动备份已保存' }),
             (error) => {
-                this.apply({ status: '请手动导出项目备份' });
-                notifyError(`自动备份失败：${(error as Error).message}`);
+                this.apply({ status: '自动备份失败' });
+                notifyError(`自动备份失败：${(error as Error).message}。请检查浏览器是否禁用了本地存储或空间不足。`);
             },
         );
     }
@@ -339,14 +339,26 @@ export class EditorSession {
         else if (entity.kind === 'camera') tab = 'camera';
         else if (!available.includes(current)) tab = 'base';
 
-        this.apply({ selected: id, inspectorTab: tab, selectedJoint: '' });
+        this.apply({
+            selected: id,
+            inspectorTab: tab,
+            selectedJoint: '',
+            selectedClipId: null,
+            selectedPathSection: null,
+        });
         this.engineRef?.select(id);
     }
 
     selectScene(): void {
         if (useEditorStore.getState().pathDraft) this.finishPath();
         setSelectedEntities([]);
-        this.apply({ selected: '', inspectorTab: 'environment', selectedJoint: '' });
+        this.apply({
+            selected: '',
+            inspectorTab: 'environment',
+            selectedJoint: '',
+            selectedClipId: null,
+            selectedPathSection: null,
+        });
         this.engineRef?.select('');
     }
 
@@ -544,6 +556,7 @@ export class EditorSession {
                 preview: 'program',
                 playing: false,
                 selectedClipId: null,
+                selectedPathSection: null,
                 selectedPoint: -1,
                 selectedJoint: '',
                 inspectorTab: 'base',
@@ -615,6 +628,14 @@ export class EditorSession {
 
     selectClip(id: string | null): void {
         this.clips.selectClip(id);
+    }
+
+    selectPathSection(entityId: string, index: number): void {
+        this.clips.selectPathSection(entityId, index);
+    }
+
+    removeSelectedPathSection(): boolean {
+        return this.clips.removeSelectedPathSection();
     }
 
     addAction(action: string): void {

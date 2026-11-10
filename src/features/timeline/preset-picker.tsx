@@ -53,15 +53,17 @@ function ActionImage({ action }: { action: Action }) {
 
 export function ActionPresetPicker({
     supported,
+    disabled = false,
     onChoose,
 }: {
     supported: Action[];
+    disabled?: boolean;
     onChoose: (action: Action) => void;
 }) {
     const t = useTranslation();
     const featured = FEATURED_ACTIONS.filter((preset) => supported.includes(preset.id));
     return (
-        <div className="preset-picker">
+        <div className="preset-picker preset-picker--inline">
             <div className="preset-picker__heading">{t('预设动作')}</div>
             <div className="preset-picker__scroll">
                 <div className="preset-picker__grid">
@@ -70,6 +72,7 @@ export function ActionPresetPicker({
                             type="button"
                             className="preset-card"
                             key={preset.id}
+                            disabled={disabled}
                             onClick={() => onChoose(preset.id)}
                         >
                             <ActionImage action={preset.id} />
@@ -82,16 +85,32 @@ export function ActionPresetPicker({
                     ))}
                 </div>
             </div>
-            <Select<Action>
-                size="small"
-                showSearch
-                placeholder={t('更多动作…')}
-                optionFilterProp="label"
-                value={undefined}
-                onChange={(action) => onChoose(action)}
-                options={supported.map((action) => ({ value: action, label: t(ACTIONS[action]) }))}
-            />
         </div>
+    );
+}
+
+export function MoreActionsSelect({
+    supported,
+    disabled = false,
+    onChoose,
+}: {
+    supported: Action[];
+    disabled?: boolean;
+    onChoose: (action: Action) => void;
+}) {
+    const t = useTranslation();
+    return (
+        <Select<Action>
+            size="small"
+            showSearch
+            aria-label={t('更多动作…')}
+            placeholder={t('更多动作…')}
+            disabled={disabled}
+            optionFilterProp="label"
+            value={undefined}
+            onChange={onChoose}
+            options={supported.map((action) => ({ value: action, label: t(ACTIONS[action]) }))}
+        />
     );
 }
 

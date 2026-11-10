@@ -3,6 +3,8 @@ import { App } from 'antd';
 import { useEffect, useState } from 'react';
 import { InspectorPanel } from '@/features/inspector/inspector-panel.tsx';
 import { useTranslation } from '@/shared/i18n/use-translation.ts';
+import { hasBlockingLayer, shouldIgnoreShortcut, isTypingTarget } from '@/shared/lib/keyboard.ts';
+import { notify } from '@/shared/ui/feedback.ts';
 import { SceneSidebar } from '@/features/sidebar/scene-sidebar.tsx';
 import { StageViewport } from '@/features/stage/stage-viewport.tsx';
 import { TimelinePanel } from '@/features/timeline/timeline-panel.tsx';
@@ -11,9 +13,23 @@ import { session } from '@/state/editor-session.ts';
 import { useEditorStore } from '@/state/editor-store.ts';
 import './editor-page.css';
 
-const isTextField = (target: EventTarget | null) =>
-    target instanceof HTMLElement &&
-    (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+/**
+ * Delete the clip the user has selected, when there is one. Returns false when no clip is
+ * selected so the caller can fall back to deleting the whole entity.
+ */
+function deleteSelectedClip(onDeleted: () => void): boolean {
+    const { selected, selectedClipId } = useEditorStore.getState();
+    if (!selectedClipId) return false;
+    const entity = session.project.entities.find((item) => item.id === selected);
+    if (!entity || !entity.clips.some((clip) => clip.id === selectedClipId)) {
+        session.selectClip(null);
+        return false;
+    }
+    if (entity.locked) return false;
+    session.removeClip(selectedClipId);
+    onDeleted();
+    return true;
+}
 
 export function EditorPage() {
     const t = useTranslation();
@@ -39,7 +55,34 @@ export function EditorPage() {
 
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {
-            if (isTextField(event.target)) return;
+            // A path draft is a modal-ish interaction: Enter/Esc finish or cancel it even when a
+            // toolbar button still holds focus from the click that started the draft.
+            const drafting = useEditorStore.getState().pathDraft !== null;
+            if (drafting && (event.key === 'Enter' || event.key === 'Escape') && !isTypingTarget(event.target)) {
+                event.preventDefault();
+                if (event.key === 'Enter') session.finishPath();
+                else session.cancelPath();
+                return;
+            }
+            const deleteKey = event.key === 'Delete' || event.key === 'Backspace';
+            const { selectedClipId, selectedPathSection } = useEditorStore.getState();
+            const focusedWidget =
+                event.target instanceof Element &&
+                event.target.closest('[role="slider"], [role="combobox"], [role="listbox"], [role="option"]');
+            if (
+                deleteKey &&
+                (selectedClipId || selectedPathSection) &&
+                !isTypingTarget(event.target) &&
+                !hasBlockingLayer() &&
+                !focusedWidget
+            ) {
+                event.preventDefault();
+                if (selectedClipId) deleteSelectedClip(() => notify(t('已删除动作片段，可用撤销恢复')));
+                else if (session.removeSelectedPathSection()) notify(t('已删除路径片段，可用撤销恢复'));
+                return;
+            }
+            // Typing, open dialogs/menus and focused buttons or sliders own the keyboard first.
+            if (shouldIgnoreShortcut(event)) return;
             if (event.metaKey || event.ctrlKey) {
                 const key = event.key.toLowerCase();
                 if (key === 'z') {
@@ -64,18 +107,6 @@ export function EditorPage() {
                 event.preventDefault();
                 session.cancelTimelineDrag();
                 return;
-            }
-            if (useEditorStore.getState().pathDraft) {
-                if (event.key === 'Enter') {
-                    event.preventDefault();
-                    session.finishPath();
-                    return;
-                }
-                if (event.key === 'Escape') {
-                    event.preventDefault();
-                    session.cancelPath();
-                    return;
-                }
             }
             if (event.key === '/') {
                 const search = document.querySelector<HTMLInputElement>('#scene-search');

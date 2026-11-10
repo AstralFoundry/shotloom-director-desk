@@ -202,6 +202,16 @@ const editableVariantIds = new Set([
     'human-muscular',
     'human-full',
 ]);
+const retiredVariantIds = new Set([
+    'human-giant',
+    'human-dwarf',
+    'human-heavy-giant',
+    'human-longlimb',
+    'human-elf',
+    'human-orc',
+    'human-robot',
+    'human-skeleton',
+]);
 export const HUMAN_ASSETS: readonly AssetDefinition[] = profiles.map((p) => ({
     id: p.id,
     name: p.name,
@@ -212,6 +222,7 @@ export const HUMAN_ASSETS: readonly AssetDefinition[] = profiles.map((p) => ({
     icon: '♙',
     aliases: p.aliases,
     libraryHidden: editableVariantIds.has(p.id) || p.id.startsWith('human-outfit-'),
+    libraryRetired: retiredVariantIds.has(p.id),
     family: 'human-v2',
     defaults: { height: p.height, gender: p.gender ?? 'male' },
     parameters: humanParameterSchema(HUMAN_PROPORTIONS[p.id]),

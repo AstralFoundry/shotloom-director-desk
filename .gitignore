@@ -28,7 +28,6 @@ release/
 !/docs/
 /docs/*
 !/docs/images/
-!/docs/feature-scope.md
 !/scripts/
 /scripts/*
 !/scripts/check-release-privacy.mjs

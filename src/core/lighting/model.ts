@@ -31,11 +31,12 @@ export interface LightingConfig {
     sunDirection?: [number, number, number];
     fog?: { color: string; density: AnimatedNumber } | null;
 }
+export const DEFAULT_SHOT_BACKGROUND = '#0b0d10';
 export const defaultLighting = (): LightingConfig => ({
     defaultLights: true,
     ambient: 2.5,
     exposure: 1.05,
-    background: '#c6c8c6',
+    background: DEFAULT_SHOT_BACKGROUND,
     groundColor: '#88847e',
     quality: 'medium',
 });

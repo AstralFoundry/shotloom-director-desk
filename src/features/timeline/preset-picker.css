@@ -7,6 +7,19 @@
     color: #eeeeee;
 }
 
+.preset-picker--inline {
+    width: 100%;
+    max-height: none;
+}
+
+.preset-picker--inline .preset-picker__scroll {
+    overflow: visible;
+}
+
+.preset-picker--inline .preset-picker__grid {
+    gap: 8px;
+}
+
 .preset-picker__heading {
     font-size: 14px;
     font-weight: 600;
@@ -41,6 +54,11 @@
 .preset-card:focus-visible {
     border-color: #666;
     background: #252525;
+}
+
+.preset-card:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 .preset-card__image,

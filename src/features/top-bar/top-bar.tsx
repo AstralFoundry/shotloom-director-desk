@@ -11,8 +11,8 @@ import {
 } from '@ant-design/icons';
 import { Button, Popover, Segmented, Tooltip } from 'antd';
 import { useState } from 'react';
-import { useTranslation } from '@/shared/i18n/use-translation.ts';
-import { getLanguage, setLanguage } from '@/shared/i18n/locale.ts';
+import { useLanguage, useTranslation } from '@/shared/i18n/use-translation.ts';
+import { setLanguage } from '@/shared/i18n/locale.ts';
 import { session } from '@/state/editor-session.ts';
 import { useEditorStore, type ViewMode } from '@/state/editor-store.ts';
 import { useProject, useRevision } from '@/state/use-editor.ts';
@@ -25,9 +25,12 @@ const VIEW_MODES: ViewMode[] = ['stage', 'split', 'shot'];
 
 export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean; onToggleSidebar: () => void }) {
     const t = useTranslation();
+    // Subscribe to the language itself so the toggle label re-renders on switch.
+    const language = useLanguage();
     const [exportOpen, setExportOpen] = useState(false);
     const [projectOpen, setProjectOpen] = useState(false);
     const [newProjectOpen, setNewProjectOpen] = useState(false);
+    const [helpOpen, setHelpOpen] = useState(false);
     const project = useProject();
     const view = useEditorStore((state) => state.view);
     const status = useEditorStore((state) => state.status);
@@ -36,6 +39,7 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
     useRevision();
     const canUndo = session.history.undoStack.length > 0;
     const canRedo = session.history.redoStack.length > 0;
+    const anyDialogOpen = exportOpen || newProjectOpen || projectOpen;
 
     const labels: Record<ViewMode, string> = {
         stage: t('导演视角'),
@@ -125,16 +129,20 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
                     trigger="click"
                     placement="bottomRight"
                     overlayClassName="help-popover"
+                    // Dialogs stack above the editor; a help popover floating over them looks
+                    // like part of the dialog and steals its clicks.
+                    open={helpOpen && !anyDialogOpen}
+                    onOpenChange={(open) => setHelpOpen(open && !anyDialogOpen)}
                 >
                     <Button type="text" size="small" icon={<QuestionCircleOutlined />} aria-label={t('操作与快捷键')} />
                 </Popover>
                 <Button
                     type="text"
                     size="small"
-                    onClick={() => setLanguage(getLanguage() === 'en' ? 'zh-CN' : 'en')}
+                    onClick={() => setLanguage(language === 'en' ? 'zh-CN' : 'en')}
                     title={t('切换界面语言')}
                 >
-                    {getLanguage() === 'en' ? '中' : 'EN'}
+                    {language === 'en' ? '中' : 'EN'}
                 </Button>
                 {newProjectOpen ? <NewProjectDialog open onClose={() => setNewProjectOpen(false)} /> : null}
                 {projectOpen ? <ProjectDialog open onClose={() => setProjectOpen(false)} /> : null}

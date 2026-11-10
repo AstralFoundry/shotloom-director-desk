@@ -111,7 +111,7 @@ export function StageViewport() {
                             : pathSurfaceMode === 'surface'
                               ? t('点击台阶、平台或地面添加路线点 · Enter 完成 · Esc 取消')
                               : t('按地面平面画路线 · Enter 完成 · Esc 取消')
-                        : t('拖动鼠标观察 · WASD 移动对象 · Q/E 转向 · R/F 升降')}
+                        : t('拖动鼠标观察 · 点击布景后 WASD 移动视角 · Q/E 转向 · R/F 升降')}
                 </div>
             </section>
 
@@ -130,7 +130,7 @@ export function StageViewport() {
                         ]}
                     />
                     <span className="shot-header__lens">
-                        {lens} mm · {project.aspect}
+                        {Number(lens.toFixed(1))} mm · {project.aspect}
                     </span>
                 </div>
                 <div className="viewport__canvas viewport__canvas--shot" ref={shotRef}>

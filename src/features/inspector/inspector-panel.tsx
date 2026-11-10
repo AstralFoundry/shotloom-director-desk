@@ -13,6 +13,7 @@ import { session } from '@/state/editor-session.ts';
 import { useEditorStore, type InspectorTab } from '@/state/editor-store.ts';
 import { inspectorTabsFor } from '@/state/inspector-tabs.ts';
 import { useProject, useSelectedEntity } from '@/state/use-editor.ts';
+import { ActionPresetPicker, MoreActionsSelect } from '@/features/timeline/preset-picker.tsx';
 
 export function InspectorPanel() {
     const t = useTranslation();
@@ -66,6 +67,10 @@ export function InspectorPanel() {
                 activeKey={activeTab}
                 onChange={(key) => session.setInspectorTab(key as InspectorTab)}
                 items={visibleTabs}
+                // Wrap onto a second row instead of scrolling: the English labels already fill
+                // the 300px panel, and a scrolled-away tab is indistinguishable from a missing
+                // feature. The wrapping itself lives in editor-page.css.
+                className="inspector__tabs"
             />
 
             <div className="inspector__body">
@@ -427,47 +432,39 @@ function ActionsPanel({ entity }: { entity: Entity }) {
     const t = useTranslation();
     const time = useEditorStore((state) => state.time);
     const selectedClipId = useEditorStore((state) => state.selectedClipId);
-    // Remount the picker after each add so it never keeps the previous selection.
-    const [pickerKey, setPickerKey] = useState(0);
     const clip = entity.clips.find((item) => item.id === selectedClipId) ?? entity.clips[0];
     const disabled = entity.locked;
     const definition = findAsset(entity.asset);
-    const supported = Object.entries(ACTIONS).filter(
-        ([key]) => !definition?.capabilities || definition.capabilities.actions.includes(key as Action),
-    );
+    const supported = Object.entries(ACTIONS)
+        .filter(([key]) => !definition?.capabilities || definition.capabilities.actions.includes(key as Action))
+        .map(([key]) => key as Action);
 
     return (
         <div className="stack">
-            <Select
-                key={pickerKey}
-                size="small"
-                showSearch
-                placeholder={t('选择动作…')}
-                disabled={disabled}
-                optionFilterProp="label"
-                onChange={(value) => {
-                    setPickerKey((key) => key + 1);
-                    session.addAction(value);
-                }}
-                options={supported.map(([key, label]) => ({ value: key, label: t(label) }))}
-                aria-label={t('添加动作')}
-            />
-
             {clip ? (
                 <>
-                    <FieldRow label={t('动作片段')}>
-                        <Select
-                            size="small"
-                            value={clip.id}
-                            disabled={disabled}
-                            aria-label={t('动作片段')}
-                            onChange={(id) => session.selectClip(id)}
-                            options={entity.clips.map((item) => ({
-                                value: item.id,
-                                label: `${clipLabel(item)} · ${item.start.toFixed(2)}—${item.end.toFixed(2)}s`,
-                            }))}
-                        />
-                    </FieldRow>
+                    <div className="field-pair">
+                        <FieldRow label={`${t('动作片段')} · ${(clip.end - clip.start).toFixed(2)}s`}>
+                            <Select
+                                size="small"
+                                value={clip.id}
+                                disabled={disabled}
+                                aria-label={t('动作片段')}
+                                onChange={(id) => session.selectClip(id)}
+                                options={entity.clips.map((item) => ({
+                                    value: item.id,
+                                    label: `${clipLabel(item)} · ${item.start.toFixed(2)}—${item.end.toFixed(2)}s`,
+                                }))}
+                            />
+                        </FieldRow>
+                        <FieldRow label={t('添加动作')}>
+                            <MoreActionsSelect
+                                supported={supported}
+                                disabled={disabled}
+                                onChoose={(action) => session.addAction(action)}
+                            />
+                        </FieldRow>
+                    </div>
                     <div className="field-pair">
                         <FieldRow label={t('开始 / 秒')}>
                             <NumberField
@@ -510,34 +507,49 @@ function ActionsPanel({ entity }: { entity: Entity }) {
                             {t('移除')}
                         </Button>
                     </div>
-                    <p className="muted small">
-                        {t('时长')} {(clip.end - clip.start).toFixed(2)}s · {clipLabel(clip)}
-                    </p>
                 </>
             ) : (
-                <p className="muted small">{t('尚无动作，选择上方动作即可添加。')}</p>
+                <>
+                    <FieldRow label={t('添加动作')}>
+                        <MoreActionsSelect
+                            supported={supported}
+                            disabled={disabled}
+                            onChoose={(action) => session.addAction(action)}
+                        />
+                    </FieldRow>
+                    <p className="muted small">{t('尚无动作，选择下方预设即可添加。')}</p>
+                </>
             )}
 
             <Divider plain style={{ margin: '4px 0' }} />
-            {entity.kind === 'actor' && !entity.external ? (
-                <FieldRow label={t('脚底贴合表面')}>
-                    <Switch
-                        size="small"
-                        checked={Boolean(entity.footContact)}
-                        onChange={(checked) => session.setFootContact(checked)}
+            <div className="field-pair">
+                {entity.kind === 'actor' && !entity.external ? (
+                    <FieldRow label={t('脚底贴合表面')}>
+                        <Switch
+                            size="small"
+                            checked={Boolean(entity.footContact)}
+                            onChange={(checked) => session.setFootContact(checked)}
+                        />
+                    </FieldRow>
+                ) : null}
+                <FieldRow label={t('基础动作衔接 / 秒')}>
+                    <NumberField
+                        value={entity.actionBlend ?? 0.2}
+                        min={0}
+                        max={2}
+                        step={0.05}
+                        precision={2}
+                        onCommit={(value) => session.setActionBlend(value)}
                     />
                 </FieldRow>
-            ) : null}
-            <FieldRow label={t('基础动作衔接 / 秒')}>
-                <NumberField
-                    value={entity.actionBlend ?? 0.2}
-                    min={0}
-                    max={2}
-                    step={0.05}
-                    precision={2}
-                    onCommit={(value) => session.setActionBlend(value)}
-                />
-            </FieldRow>
+            </div>
+
+            <Divider plain style={{ margin: '4px 0' }} />
+            <ActionPresetPicker
+                supported={supported}
+                disabled={disabled}
+                onChoose={(action) => session.addAction(action)}
+            />
         </div>
     );
 }

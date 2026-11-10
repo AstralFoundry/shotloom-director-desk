@@ -387,7 +387,10 @@ export function ExportDialog({ open, onClose }: { open: boolean; onClose: () => 
 
                 <div className="export-preview">
                     <span className="muted small">
-                        {t('当前画面')} · {t('按切镜输出')}
+                        {t('当前画面')} ·{' '}
+                        {form.cameraId === 'program'
+                            ? t('按切镜输出')
+                            : (cameras.find((camera) => camera.id === form.cameraId)?.name ?? t('按切镜输出'))}
                     </span>
                     {previewImage ? (
                         <img src={previewImage} alt={t('当前画面')} />

@@ -11,8 +11,7 @@ import {
 import { Button, Popover, Slider, Switch, Tooltip } from 'antd';
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { pathSections } from '@/core/clip-editing.ts';
-import { ACTIONS, clipLabel, type Action, type Clip, type Entity } from '@/core/model.ts';
-import { findAsset } from '@/core/asset-catalog.ts';
+import { clipLabel, type Clip, type Entity } from '@/core/model.ts';
 import { timecode } from '@/shared/lib/format.ts';
 import { useTranslation } from '@/shared/i18n/use-translation.ts';
 import { NumberField } from '@/shared/ui/number-field.tsx';
@@ -20,7 +19,7 @@ import { session } from '@/state/editor-session.ts';
 import { useEditorStore } from '@/state/editor-store.ts';
 import { useProject, useSelectedEntity } from '@/state/use-editor.ts';
 import { beginClipDrag } from './clip-drag.ts';
-import { ActionPresetPicker, CameraPresetPicker } from './preset-picker.tsx';
+import { CameraPresetPicker } from './preset-picker.tsx';
 
 /** Leave a little head-room after the last clip so the ruler never feels clipped. */
 const MIN_EXTENT = 8;
@@ -52,7 +51,6 @@ export function TimelinePanel({
     const bodyRef = useRef<HTMLDivElement>(null);
     const pendingZoomAnchor = useRef<{ fraction: number; x: number } | null>(null);
     const resizing = useRef<{ y: number; height: number } | null>(null);
-    const [actionPickerOpen, setActionPickerOpen] = useState(false);
     const [cameraPickerOpen, setCameraPickerOpen] = useState(false);
     const project = useProject();
     const time = useEditorStore((state) => state.time);
@@ -60,14 +58,6 @@ export function TimelinePanel({
     const loop = useEditorStore((state) => state.loop);
     const selected = useEditorStore((state) => state.selected);
     const selectedEntity = useSelectedEntity();
-    const supportedActions = selectedEntity
-        ? Object.entries(ACTIONS).filter(
-              ([key]) =>
-                  !findAsset(selectedEntity.asset)?.capabilities ||
-                  findAsset(selectedEntity.asset)?.capabilities?.actions.includes(key as Action),
-          )
-        : [];
-
     const tracks = project.entities.filter(
         (entity) => entity.kind !== 'prop' || entity.path !== null || entity.clips.length > 0,
     );
@@ -315,30 +305,15 @@ export function TimelinePanel({
                             </Button>
                         </Popover>
                     ) : selectedEntity?.kind === 'actor' || selectedEntity?.kind === 'crowd' ? (
-                        <Popover
-                            trigger="click"
-                            placement="top"
-                            open={actionPickerOpen}
-                            onOpenChange={setActionPickerOpen}
-                            content={
-                                <ActionPresetPicker
-                                    supported={supportedActions.map(([key]) => key as Action)}
-                                    onChoose={(action) => {
-                                        session.addAction(action);
-                                        setActionPickerOpen(false);
-                                    }}
-                                />
-                            }
+                        <Button
+                            className="timeline__add"
+                            icon={<PlusOutlined />}
+                            type="primary"
+                            disabled={selectedEntity.locked}
+                            onClick={() => session.setInspectorTab('actions')}
                         >
-                            <Button
-                                className="timeline__add"
-                                icon={<PlusOutlined />}
-                                type="primary"
-                                disabled={selectedEntity.locked}
-                            >
-                                {t('角色动画')}
-                            </Button>
-                        </Popover>
+                            {t('角色动画')}
+                        </Button>
                     ) : null}
                     <label className="duration-input">
                         {t('时长')}
@@ -546,6 +521,7 @@ function rulerTicks(extent: number, zoom: number): number[] {
 
 function PathLane({ entity, extent, fps }: { entity: Entity; extent: number; fps: number }) {
     const t = useTranslation();
+    const selectedPathSection = useEditorStore((state) => state.selectedPathSection);
     if (!entity.path) return null;
     const sections = pathSections(entity.path);
     if (!sections.length)
@@ -557,9 +533,11 @@ function PathLane({ entity, extent, fps }: { entity: Entity; extent: number; fps
     return (
         <>
             {sections.map((section, index) => (
-                <span
+                <button
+                    type="button"
                     key={index}
-                    className="clip clip--path"
+                    className={`clip clip--path ${selectedPathSection?.entityId === entity.id && selectedPathSection.index === index ? 'is-selected' : ''}`}
+                    aria-pressed={selectedPathSection?.entityId === entity.id && selectedPathSection.index === index}
                     style={{
                         left: `${(section.start / extent) * 100}%`,
                         width: `${Math.max(((section.end - section.start) / extent) * 100, 0.6)}%`,
@@ -567,6 +545,7 @@ function PathLane({ entity, extent, fps }: { entity: Entity; extent: number; fps
                     onPointerDown={(event) => {
                         event.stopPropagation();
                         session.selectEntity(entity.id);
+                        session.selectPathSection(entity.id, index);
                         useEditorStore.getState().patch({ inspectorTab: 'path' });
                         beginClipDrag(
                             event,
@@ -578,10 +557,16 @@ function PathLane({ entity, extent, fps }: { entity: Entity; extent: number; fps
                             },
                         );
                     }}
+                    onClick={(event) => {
+                        if (event.detail !== 0) return;
+                        session.selectEntity(entity.id);
+                        session.selectPathSection(entity.id, index);
+                        useEditorStore.getState().patch({ inspectorTab: 'path' });
+                    }}
                 >
                     {entity.kind === 'camera' ? t('运镜') : t('路径')} {index + 1}
                     <i className="clip__handle" data-resize="true" aria-hidden="true" />
-                </span>
+                </button>
             ))}
         </>
     );

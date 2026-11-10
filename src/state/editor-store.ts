@@ -36,6 +36,8 @@ export interface EditorState {
     selectedPoint: number;
     /** Action clip selected in the inspector/timeline. */
     selectedClipId: string | null;
+    /** Motion-path section selected on the timeline. */
+    selectedPathSection: { entityId: string; index: number } | null;
     /** Joint being edited in the pose panel, '' when none. */
     selectedJoint: Joint | '';
     revision: number;
@@ -70,6 +72,7 @@ export const useEditorStore = create<EditorState>()((set) => ({
     pathDrawDuration: 5,
     selectedPoint: -1,
     selectedClipId: null,
+    selectedPathSection: null,
     selectedJoint: '',
     revision: 0,
     dirty: false,

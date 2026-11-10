@@ -65,7 +65,7 @@ export const ASSETS: readonly AssetDefinition[] = [
     ...ROOM_PART_ASSETS,
     ...LIGHT_ASSETS,
 ];
-const LIBRARY_ASSETS = ASSETS.filter((asset) => !asset.libraryHidden);
+const LIBRARY_ASSETS = ASSETS.filter((asset) => !asset.libraryHidden && !asset.libraryRetired);
 export const ASSET_GROUPS = [...new Set(LIBRARY_ASSETS.map((a) => a.group))];
 const assetsById = new Map(ASSETS.map((asset) => [asset.id, asset]));
 export const findAsset = (id: string) => assetsById.get(id);
@@ -74,7 +74,7 @@ export const isAnimalAsset = (id: string) =>
 export const assetJoints = (id: string) => findAsset(id)?.joints ?? HUMAN_JOINTS;
 export function searchAssets(query: string, group = '全部') {
     const words = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
-    const source = words.length ? ASSETS : LIBRARY_ASSETS;
+    const source = words.length ? ASSETS.filter((asset) => !asset.libraryRetired) : LIBRARY_ASSETS;
     return source.filter(
         (a) =>
             (group === '全部' || a.group === group) &&

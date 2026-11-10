@@ -56,7 +56,13 @@ export class PathCommands {
         };
         engine.drawingPath = true;
         engine.gizmo.detach();
-        this.host.patch({ pathDraft: e.id, selectedPoint: 0, inspectorTab: 'path' });
+        this.host.patch({
+            pathDraft: e.id,
+            selectedPoint: 0,
+            selectedClipId: null,
+            selectedPathSection: null,
+            inspectorTab: 'path',
+        });
         this.host.setView('stage');
         engine.refreshHelpers();
     }
@@ -135,7 +141,7 @@ export class PathCommands {
             e.position = entityPosition(e, this.host.clock).toArray() as Vec3;
             e.path = null;
         }, false);
-        this.host.patch({ selectedPoint: -1 });
+        this.host.patch({ selectedPoint: -1, selectedPathSection: null });
     }
 
     selectPathPoint(index: number): void {
@@ -195,7 +201,7 @@ export class PathCommands {
             e.path!.points.splice(index, 1);
             if (e.path!.points.length < 1) e.path = null;
         }, false);
-        this.host.patch({ selectedPoint: -1 });
+        this.host.patch({ selectedPoint: -1, selectedPathSection: null });
     }
 
     holdPathPoint(): void {

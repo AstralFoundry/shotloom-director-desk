@@ -1,6 +1,6 @@
 # shotloom-director-desk
 
-A web workbench for 3D scene previsualization: stage sets and characters, plan motion and camera moves, edit a timeline, and export reference video. See the [feature scope](docs/feature-scope.md) (Chinese) for known limitations.
+A web workbench for 3D scene previsualization: stage sets and characters, plan motion and camera moves, edit a timeline, and export reference video.
 
 **Block a scene, plan blocking and camera moves, export a reference video.**
 
@@ -28,6 +28,11 @@ A 3D previz tool for AI short films: place mannequins in a white-model set, work
 
 The default character is generated from original code and basic geometry. Its body parts use the same joints for poses and animation, with no external character model file.
 
+## Current limitations
+
+- Live phone-based camera control is not available yet.
+- Image and panorama backgrounds, scene-root transforms, and ground transparency/height controls are not available yet.
+
 ## Development
 
 ```bash
@@ -41,7 +46,7 @@ npm run format       # format with Prettier (CI enforces format:check)
 npm run smoke        # browser smoke test (requires npm run dev)
 ```
 
-The UI is React 19 + Ant Design 6; the 3D engine and domain logic stay framework-free. Layers and migration status: [docs/architecture.md](docs/architecture.md).
+The UI is React 19 + Ant Design 6; the 3D engine and domain logic stay framework-free.
 
 Formatting is owned by Prettier (`.prettierrc.json`: 4-space indent, single quotes, 120 columns). Run `npm run format` before committing.
 

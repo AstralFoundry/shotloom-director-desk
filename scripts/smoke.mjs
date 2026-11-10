@@ -101,9 +101,20 @@ try {
     await page.getByRole('button', { name: '撤销' }).click();
     assert.equal(await positionOf(), before, 'one undo restores the position');
 
-    // Asset catalogue: placing a card adds a selected entity.
+    // Asset catalogue: placing a card adds a selected entity. The sidebar starts collapsed
+    // in a fresh session, so the "添加" tab is only reachable after opening the panel.
+    await page.getByRole('button', { name: '展开场景面板' }).click();
     await page.getByText('添加', { exact: true }).click();
-    await page.locator('.asset-card').first().click();
+    // Cards swap their icon placeholder for a lazily rendered thumbnail; click only once the
+    // first card has settled so the click cannot land on a repainting node.
+    const firstCard = page.locator('.asset-card').first();
+    await firstCard.waitFor();
+    await firstCard.click();
+    await page.waitForFunction(
+        (expected) => window.__editorDebug.store.getState().project.entities.length === expected,
+        initial.entities + 1,
+        { timeout: 5_000 },
+    );
     const afterAsset = await state();
     assert.equal(afterAsset.entities, initial.entities + 1, 'catalogue asset is placed');
 
@@ -157,10 +168,11 @@ try {
     assert.equal(await draggedStart(), 0, 'one undo restores the clip position');
 
     // Action clips: add from the picker, split at the playhead, remove the right half.
+    // The inspector row is a searchable Select; its field carries the "更多动作…" label.
     await page.locator('.inspector .ant-tabs-tab', { hasText: '动作' }).click();
-    const picker = page.locator('input[aria-label="添加动作"]');
+    const picker = page.locator('.inspector .ant-select').filter({ hasText: '更多动作' }).first();
     await picker.click();
-    await picker.fill('挥手');
+    await page.keyboard.type('挥手');
     await page.keyboard.press('Enter');
     const clipsAfterAdd = await page.evaluate(() => {
         const state = window.__editorDebug.store.getState();
@@ -299,7 +311,8 @@ try {
     assert.equal(await page.locator('.help-group').count(), 4, 'help groups render');
     await page.keyboard.press('Escape');
 
-    await page.locator('.inspector .ant-tabs-tab', { hasText: '环境' }).click();
+    // Environment is reached from the inspector header button, not from the tab strip.
+    await page.locator('.inspector .inspector__scene-button').click();
     await page.locator('.inspector .ant-switch').first().click();
     assert.equal(
         await page.evaluate(() => window.__editorDebug.store.getState().project.room.enabled),

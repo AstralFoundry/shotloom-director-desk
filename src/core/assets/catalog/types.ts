@@ -20,6 +20,8 @@ export interface AssetDefinition {
     aliases?: readonly string[];
     /** Hide editable variants from the default library while keeping them searchable and loadable. */
     libraryHidden?: boolean;
+    /** Keep existing scenes loadable, but remove this asset from browsing and search. */
+    libraryRetired?: boolean;
     family?: string;
     defaults?: Partial<Pick<Entity, 'height' | 'gender' | 'build' | 'light' | 'color'>>;
     capabilities?: {

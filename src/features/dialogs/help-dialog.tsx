@@ -11,7 +11,7 @@ const GROUPS: Array<{ title: string; items: Array<[string, string]> }> = [
             ['Ctrl / ⌘ + B', '在播放头分割片段'],
             ['Ctrl / ⌘ + D', '复制选中对象'],
             ['/', '搜索场景对象或资产'],
-            ['Delete', '删除选中对象'],
+            ['Delete', '删除选中片段或对象'],
         ],
     },
     {
@@ -54,7 +54,9 @@ export function HelpPanel() {
                         {group.items.map(([keys, description]) => (
                             <div className="help-shortcut" key={keys}>
                                 <span>{t(description)}</span>
-                                <kbd>{keys}</kbd>
+                                {/* Most rows are key glyphs, but mouse gestures ("拖动片段") are
+                                    words and need translating too. */}
+                                <kbd>{t(keys)}</kbd>
                             </div>
                         ))}
                     </div>

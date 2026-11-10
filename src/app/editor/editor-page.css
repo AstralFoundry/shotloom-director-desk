@@ -745,6 +745,22 @@
     background: #202020;
 }
 
+/* Localised labels can exceed the 300px panel (English "Properties / Blocking / Actions /
+   Poses" already fills it). Let the tab list wrap instead of hiding tabs behind a scroll
+   arrow, so every panel stays reachable. */
+.inspector__tabs .ant-tabs-nav-wrap {
+    overflow: visible;
+}
+
+.inspector__tabs .ant-tabs-nav-list {
+    flex-wrap: wrap;
+    row-gap: 3px;
+}
+
+.inspector__tabs .ant-tabs-nav-operations {
+    display: none;
+}
+
 .inspector .ant-tabs-nav::before,
 .inspector .ant-tabs-ink-bar {
     display: none;
@@ -948,11 +964,14 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
+    flex-wrap: wrap;
+    gap: 6px 16px;
     min-height: 54px;
     padding: 6px 12px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    overflow-x: auto;
+    /* English labels are wider than the Chinese originals. Wrap the transport bar instead of
+       growing a horizontal scrollbar that quietly clips the right-hand readouts. */
+    overflow-x: hidden;
 }
 
 @media (max-width: 1600px) {
@@ -976,9 +995,9 @@
 .timeline__meta {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     min-width: 0;
-    flex-shrink: 0;
 }
 
 .timeline__meta > * {
@@ -1290,7 +1309,7 @@
     border-style: dashed;
     border-color: color-mix(in srgb, #6daac4 55%, #242424);
     color: rgba(250, 250, 250, 0.72);
-    cursor: default;
+    cursor: pointer;
 }
 
 .clip--camera {
@@ -1358,9 +1377,17 @@
 }
 
 .field-pair {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
+}
+
+.field-pair > .field-row {
+    min-width: 0;
+}
+
+.field-pair .ant-select {
+    width: 100%;
 }
 
 /* Dialogs & scrolling ------------------------------------------------ */
@@ -1445,6 +1472,14 @@
     max-height: calc(100vh - 220px);
     overflow-y: auto;
     padding-right: 4px;
+    /* antd leaves the body transparent; give it the dialog surface so the viewport
+       behind never bleeds through the form. */
+    background: #1a1a1a;
+}
+
+.ant-modal .ant-modal-content,
+.ant-modal .ant-modal-container {
+    background: #1a1a1a;
 }
 
 *::-webkit-scrollbar {

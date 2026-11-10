@@ -1,4 +1,11 @@
-import { dragClipRange, nextFreeStart, splitClip, type TimelineSelection } from '@/core/clip-editing.ts';
+import {
+    deleteClip,
+    dragClipRange,
+    nextFreeStart,
+    pathSections,
+    splitClip,
+    type TimelineSelection,
+} from '@/core/clip-editing.ts';
 import { actionDuration } from '@/core/animation/action-timing.ts';
 import { assertProject, clone, type Cut, type Entity, type MotionPath } from '@/core/model.ts';
 import { notifyError } from '@/shared/ui/feedback.ts';
@@ -110,7 +117,31 @@ export class ClipCommands {
     }
 
     selectClip(id: string | null): void {
-        this.host.patch({ selectedClipId: id });
+        this.host.patch({ selectedClipId: id, selectedPathSection: null });
+    }
+
+    selectPathSection(entityId: string, index: number): void {
+        const entity = this.host.project.entities.find((item) => item.id === entityId);
+        if (!entity?.path || !pathSections(entity.path)[index]) return;
+        this.host.patch({ selectedClipId: null, selectedPathSection: { entityId, index } });
+    }
+
+    removeSelectedPathSection(): boolean {
+        const { selected, selectedPathSection } = useEditorStore.getState();
+        if (!selectedPathSection) return false;
+        const entity = this.host.project.entities.find((item) => item.id === selectedPathSection.entityId);
+        if (selected !== entity?.id || !entity.path || !pathSections(entity.path)[selectedPathSection.index]) {
+            this.host.patch({ selectedPathSection: null });
+            return false;
+        }
+        if (entity.locked) return false;
+        const removed = this.host.change(() => {
+            deleteClip(this.host.project, { kind: 'path', ...selectedPathSection });
+            // Dolly-zoom presets animate focal length alongside their motion path.
+            if (!entity.path && entity.camera?.focalKeys) delete entity.camera.focalKeys;
+        }, false);
+        if (removed) this.host.patch({ selectedPathSection: null, selectedPoint: -1 });
+        return removed;
     }
 
     /** Append an action clip at the first free slot at/after the playhead. */
@@ -134,7 +165,7 @@ export class ClipCommands {
             e.clips.sort((a, b) => a.start - b.start);
             this.host.extendDuration();
         }, false);
-        if (created) this.host.patch({ selectedClipId: created });
+        if (created) this.selectClip(created);
     }
 
     setClipField(id: string, patch: Partial<Pick<Entity['clips'][number], 'start' | 'end' | 'speed'>>): void {

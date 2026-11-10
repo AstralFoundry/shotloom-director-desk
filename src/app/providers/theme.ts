@@ -80,6 +80,8 @@ export const editorTheme: ThemeConfig = {
             optionActiveBg: '#2c2c2c',
         },
         Modal: {
+            // Keep every surface of the dialog opaque: a transparent body lets the 3D viewport
+            // and stray overlays show through the middle of the panel.
             contentBg: '#1a1a1a',
             headerBg: 'transparent',
             titleFontSize: 16,

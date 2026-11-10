@@ -1,4 +1,5 @@
 import { SceneLighting } from './lighting/runtime.ts';
+import { DEFAULT_SHOT_BACKGROUND } from './lighting/model.ts';
 import { installWallTransmission, isWallEntity } from './lighting/wall-transmission.ts';
 import { fitFeetToSurface } from './editor/foot-contact.ts';
 import { SceneRenderCache } from './editor/scene-render-cache.ts';
@@ -161,7 +162,7 @@ export class Engine {
         this.stage = stage;
         this.shot = shot;
         this.cb = callbacks;
-        this.scene.background = new T.Color('#c6c8c6');
+        this.scene.background = new T.Color(DEFAULT_SHOT_BACKGROUND);
         this.lighting = new SceneLighting(this.scene);
         this.editorRenderer = this.renderer();
         this.shotRenderer = this.renderer();
@@ -984,7 +985,9 @@ export class Engine {
             const rig = this.rigs.get(cameraEntity.camera!.targetId);
             if (rig) rig.head.visible = false;
         }
-        this.scene.background = new T.Color(editor ? '#080808' : (this.project.lighting?.background ?? '#c6c8c6'));
+        this.scene.background = new T.Color(
+            editor ? '#080808' : (this.project.lighting?.background ?? DEFAULT_SHOT_BACKGROUND),
+        );
     }
     resize() {
         const ratio = Math.min(window.devicePixelRatio, 1.5) * (this.previewQuality === 'draft' ? 0.65 : 1);
