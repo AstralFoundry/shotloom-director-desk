@@ -2,8 +2,6 @@ import {
     AimOutlined,
     BorderOutlined,
     CameraOutlined,
-    CheckOutlined,
-    CloseOutlined,
     DragOutlined,
     ExpandOutlined,
     HomeOutlined,
@@ -159,33 +157,21 @@ export function StageViewport() {
                 </div>
                 <span className="viewport__toolbar-separator" aria-hidden="true" />
                 <div className="viewport__tool-group">
-                    {pathDraft ? (
-                        <>
-                            <Button
-                                size="small"
-                                type="primary"
-                                icon={<CheckOutlined />}
-                                onClick={() => session.finishPath()}
-                            >
-                                {t('完成路线')}
-                            </Button>
-                            <Button size="small" icon={<CloseOutlined />} onClick={() => session.cancelPath()}>
-                                {t('取消')}
-                            </Button>
-                            <span className="viewport__drawing">
-                                {draftEntity?.path?.points.length ?? 0} {t('个路径点')}
-                            </span>
-                        </>
-                    ) : (
-                        <Tooltip title={t('添加路径')}>
-                            <Button
-                                size="small"
-                                icon={<BranchesOutlined />}
-                                aria-label={t('添加路径')}
-                                disabled={!selectedEntity || selectedEntity.locked}
-                                onClick={() => session.startPath()}
-                            />
-                        </Tooltip>
+                    <Tooltip title={t(pathDraft ? '完成路线' : '添加路径')}>
+                        <Button
+                            size="small"
+                            className={pathDraft ? 'is-active' : ''}
+                            icon={<BranchesOutlined />}
+                            aria-label={t(pathDraft ? '完成路线' : '添加路径')}
+                            aria-pressed={Boolean(pathDraft)}
+                            disabled={!pathDraft && (!selectedEntity || selectedEntity.locked)}
+                            onClick={() => (pathDraft ? session.finishPath() : session.startPath())}
+                        />
+                    </Tooltip>
+                    {pathDraft && (
+                        <span className="viewport__drawing">
+                            {draftEntity?.path?.points.length ?? 0} {t('个路径点')}
+                        </span>
                     )}
                     <Tooltip title={t('添加机位')}>
                         <Button
