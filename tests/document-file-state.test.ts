@@ -53,7 +53,7 @@ test('opening/newing and undo restore the correct file identity and latest save 
     assert.equal(s.dirty, false);
     const newDoc = readSceneDocument(demoProject());
     newDoc.name = 'New';
-    s.replace(newDoc, s.context, '新建工程');
+    s.replace(newDoc, s.context, '重置项目');
     s.setFile();
     assert.equal(s.filePath, '');
     assert.equal(s.dirty, true);

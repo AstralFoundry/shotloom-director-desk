@@ -17,25 +17,20 @@ test('lock protects edits and deletion while allowing explicit unlock and indepe
     independent.entities[1].height = 1.8;
     assert.doesNotThrow(() => assertLockedEntitiesUnchanged(p, independent));
 });
-import { createScene, SCENE_TEMPLATES } from '../src/core/scene-templates.ts';
-test('every scene template is editable project data and outdoor ground is real geometry', () => {
-    for (const template of SCENE_TEMPLATES) {
-        const p = createScene(template.id);
-        assert.deepEqual(validateProject(JSON.parse(JSON.stringify(p))), p);
-        if (['bedroom', 'room'].includes(template.id)) assert.equal(p.room.enabled, true);
-        else {
-            assert.equal(p.room.enabled, false);
-            const ground = p.entities.find((e) => e.asset === 'ground');
-            assert.ok(ground);
-            const mesh = makeProp(ground);
-            mesh.scale.set(...ground.scale);
-            mesh.updateMatrixWorld(true);
-            const box = new Box3().setFromObject(mesh);
-            assert.ok(Math.abs(box.max.y) < 0.00001);
-            assert.ok(box.max.x - box.min.x > 10);
-            disposeTree(mesh);
-        }
-    }
+import { createScene } from '../src/core/scene-templates.ts';
+test('default scene is editable project data and its ground is real geometry', () => {
+    const p = createScene();
+    assert.deepEqual(validateProject(JSON.parse(JSON.stringify(p))), p);
+    assert.equal(p.room.enabled, false);
+    const ground = p.entities.find((e) => e.asset === 'ground');
+    assert.ok(ground);
+    const mesh = makeProp(ground);
+    mesh.scale.set(...ground.scale);
+    mesh.updateMatrixWorld(true);
+    const box = new Box3().setFromObject(mesh);
+    assert.ok(Math.abs(box.max.y) < 0.00001);
+    assert.ok(box.max.x - box.min.x > 10);
+    disposeTree(mesh);
 });
 import { Box3, PerspectiveCamera, Vector3 } from 'three';
 import { animateHuman, disposeTree, makeHuman, makeProp } from '../src/core/assets.ts';

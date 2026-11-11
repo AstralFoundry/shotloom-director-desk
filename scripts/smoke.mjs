@@ -11,6 +11,8 @@ import fs from 'node:fs/promises';
  * one undo restores it, playback advances, and the console stays clean.
  */
 const base = process.env.DIRECTOR_URL || 'http://127.0.0.1:5173';
+const url = new URL(base);
+url.searchParams.set('theme', 'light');
 await fs.mkdir('tmp/smoke', { recursive: true });
 const browser = await chromium.launch({
     ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: 'chrome' }),
@@ -42,7 +44,7 @@ const state = () =>
     });
 
 try {
-    await page.goto(base, { waitUntil: 'networkidle' });
+    await page.goto(url.href, { waitUntil: 'networkidle' });
     await page.waitForFunction(() => !!window.__editorDebug, { timeout: 15_000 });
     await page.locator('.viewport__canvas canvas').first().waitFor({ timeout: 15_000 });
     await page.screenshot({ path: 'tmp/smoke/01-director-view.png' });
@@ -67,6 +69,41 @@ try {
     await page.getByText('机位视角', { exact: true }).click();
     await page.locator('.viewport__canvas--shot canvas').waitFor();
     assert.equal((await state()).view, 'shot', 'shot view is active');
+    const shotColors = await page.evaluate(async () => {
+        const engine = window.__editorDebug.session.engine;
+        const pixel = (source, x, y) => {
+            const canvas = document.createElement('canvas');
+            canvas.width = canvas.height = 1;
+            const context = canvas.getContext('2d');
+            context.drawImage(source, source.width * x, source.height * y, 1, 1, 0, 0, 1, 1);
+            return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
+        };
+        engine.render();
+        const preview = {
+            sky: pixel(engine.shotRenderer.domElement, 0.02, 0.02),
+            floor: pixel(engine.shotRenderer.domElement, 0.02, 0.98),
+        };
+        engine.exporting = true;
+        try {
+            await engine.prepareOutput(0);
+            const output = engine.renderOutput(0, 640, 360, 'program');
+            return { preview, output: { sky: pixel(output, 0.02, 0.02), floor: pixel(output, 0.02, 0.98) } };
+        } finally {
+            engine.restorePreview(0);
+        }
+    });
+    for (const region of ['sky', 'floor']) {
+        assert.ok(
+            shotColors.preview[region].every((channel) => channel > 160),
+            `light preview ${region} is light`,
+        );
+        assert.ok(
+            shotColors.preview[region].every(
+                (channel, index) => Math.abs(channel - shotColors.output[region][index]) < 8,
+            ),
+            `exported ${region} matches the live shot: ${JSON.stringify(shotColors)}`,
+        );
+    }
     await page.screenshot({ path: 'tmp/smoke/02-shot-view.png' });
     await page.getByText('导演视角', { exact: true }).click();
 
@@ -237,6 +274,16 @@ try {
         const { session } = window.__editorDebug;
         const engine = session.engineOrNull;
         const { exportVideo } = await import('/src/core/export.ts');
+        const skyPixel = (source, width, height) => {
+            const canvas = document.createElement('canvas');
+            canvas.width = canvas.height = 1;
+            const context = canvas.getContext('2d');
+            context.drawImage(source, width * 0.02, height * 0.02, 1, 1, 0, 0, 1, 1);
+            return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
+        };
+        await engine.prepareOutput(0);
+        const reference = skyPixel(engine.renderOutput(0, 640, 360, 'program'), 640, 360);
+        engine.restorePreview(0);
         const controller = new AbortController();
         const blob = await exportVideo(
             engine,
@@ -253,10 +300,39 @@ try {
             controller.signal,
             () => {},
         );
-        return { size: blob?.size ?? 0, type: blob?.type ?? '' };
+        const video = document.createElement('video');
+        const url = URL.createObjectURL(blob);
+        try {
+            video.src = url;
+            await new Promise((resolve, reject) => {
+                video.onloadeddata = resolve;
+                video.onerror = () => reject(new Error('无法读取导出视频的首帧'));
+                video.load();
+            });
+            await new Promise((resolve) => {
+                video.onseeked = resolve;
+                video.currentTime = 0.1;
+            });
+            return {
+                size: blob?.size ?? 0,
+                type: blob?.type ?? '',
+                reference,
+                firstFrame: skyPixel(video, video.videoWidth, video.videoHeight),
+            };
+        } finally {
+            URL.revokeObjectURL(url);
+        }
     });
     assert.ok(exported.size > 1000, `encoder produced a video (${exported.size} bytes)`);
     assert.equal(exported.type, 'video/mp4', 'encoder output is MP4');
+    assert.ok(
+        exported.reference.every((channel) => channel > 160),
+        'light shot is used for video export',
+    );
+    assert.ok(
+        exported.reference.every((channel, index) => Math.abs(channel - exported.firstFrame[index]) < 25),
+        `encoded video keeps the light shot background: ${JSON.stringify(exported)}`,
+    );
 
     // Model import: an OBJ round-trips through pack/parse into an external entity.
     await fs.writeFile(
@@ -297,7 +373,8 @@ try {
     assert.deepEqual(imported.formats, ['obj'], 'project stores the packed OBJ resource');
 
     // Dialogs: project settings, help reference, and room controls.
-    await page.getByRole('button', { name: '项目设置' }).click();
+    await page.getByRole('button', { name: '更多' }).click();
+    await page.getByRole('menuitem', { name: '项目设置' }).click();
     await page.locator('input[aria-label="项目名称"]').fill('冒烟场景');
     await page.getByRole('button', { name: /应\s*用/ }).click();
     assert.equal(
@@ -343,18 +420,19 @@ try {
         'framing preset moves the camera',
     );
 
-    // New project: starts from the template and remains undoable.
+    // Reset project: restores the default scene and remains undoable.
     const beforeNew = (await state()).entities;
-    await page.getByRole('button', { name: '新建工程' }).click();
-    await page.locator('.ant-modal-footer .ant-btn-primary').click();
+    await page.getByRole('button', { name: '更多' }).click();
+    await page.getByRole('menuitem', { name: '重置项目' }).click();
+    await page.getByRole('dialog', { name: '重置项目' }).getByRole('button', { name: '重置项目' }).click();
     const created = await page.evaluate(() => {
         const project = window.__editorDebug.store.getState().project;
         return { name: project.name, entities: project.entities.length };
     });
-    assert.equal(created.name, '空白场地', 'new project uses the template');
-    assert.ok(created.entities >= 2, 'template has a ground and a camera');
+    assert.equal(created.name, '冒烟场景', 'reset project keeps the current project name');
+    assert.equal(created.entities, 3, 'default scene restores the ground, actor and camera');
     await page.getByRole('button', { name: '撤销' }).click();
-    assert.equal((await state()).entities, beforeNew, 'new project is undoable');
+    assert.equal((await state()).entities, beforeNew, 'reset project is undoable');
 
     // Playback advances the shared clock.
     await page.evaluate(() => window.__editorDebug.session.togglePlay());
@@ -398,7 +476,7 @@ try {
 
     assert.deepEqual(errors, [], 'browser console stays clean');
     console.log(
-        'Smoke passed: engine mount, view switch, selection, committed edit, undo, asset placement, cut insertion, path drawing, clip drag, action clips, pose edit, video export, model import, dialogs, camera framing, new project, shortcuts, viewpoint navigation, playback and autosave recovery.',
+        'Smoke passed: engine mount, view switch, selection, committed edit, undo, asset placement, cut insertion, path drawing, clip drag, action clips, pose edit, video export, model import, dialogs, camera framing, project reset, shortcuts, viewpoint navigation, playback and autosave recovery.',
     );
 } finally {
     await browser.close();

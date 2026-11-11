@@ -1,6 +1,5 @@
 import {
     DownloadOutlined,
-    FileAddOutlined,
     MoreOutlined,
     PictureOutlined,
     QuestionCircleOutlined,
@@ -14,15 +13,14 @@ import {
 } from '@ant-design/icons';
 import { Button, Dropdown, Popover, Segmented, Tooltip } from 'antd';
 import { useState } from 'react';
-import { useLanguage, useTranslation } from '@/shared/i18n/use-translation.ts';
-import { setLanguage } from '@/shared/i18n/locale.ts';
+import { useTranslation } from '@/shared/i18n/use-translation.ts';
 import { session } from '@/state/editor-session.ts';
 import { useEditorStore, type ViewMode } from '@/state/editor-store.ts';
-import { useProject, useRevision } from '@/state/use-editor.ts';
+import { useRevision } from '@/state/use-editor.ts';
 import { ExportDialog } from '@/features/export/export-dialog.tsx';
 import { HelpPanel } from '@/features/dialogs/help-dialog.tsx';
 import { ProjectDialog } from '@/features/dialogs/project-dialog.tsx';
-import { NewProjectDialog } from '@/features/dialogs/new-project-dialog.tsx';
+import { ResetProjectDialog } from '@/features/dialogs/reset-project-dialog.tsx';
 import { SettingsDialog } from '@/features/settings/settings-dialog.tsx';
 import { getEditorTheme } from '@/app/providers/theme.ts';
 
@@ -30,14 +28,11 @@ const VIEW_MODES: ViewMode[] = ['stage', 'split', 'shot'];
 
 export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean; onToggleSidebar: () => void }) {
     const t = useTranslation();
-    // Subscribe to the language itself so the toggle label re-renders on switch.
-    const language = useLanguage();
     const [exportOpen, setExportOpen] = useState(false);
     const [projectOpen, setProjectOpen] = useState(false);
-    const [newProjectOpen, setNewProjectOpen] = useState(false);
+    const [resetProjectOpen, setResetProjectOpen] = useState(false);
     const [helpOpen, setHelpOpen] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
-    const project = useProject();
     const view = useEditorStore((state) => state.view);
     const status = useEditorStore((state) => state.status);
     const dirty = useEditorStore((state) => state.dirty);
@@ -45,7 +40,7 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
     useRevision();
     const canUndo = session.history.undoStack.length > 0;
     const canRedo = session.history.redoStack.length > 0;
-    const anyDialogOpen = exportOpen || newProjectOpen || projectOpen || settingsOpen;
+    const anyDialogOpen = exportOpen || resetProjectOpen || projectOpen || settingsOpen;
     const theme = getEditorTheme();
 
     const labels: Record<ViewMode, string> = {
@@ -57,7 +52,7 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
     /** Secondary actions live behind one menu so the bar stops overflowing on narrow screens. */
     const moreMenu = {
         items: [
-            { key: 'new', icon: <FileAddOutlined />, label: t('新建工程') },
+            { key: 'reset-project', icon: <RedoOutlined />, label: t('重置项目'), danger: true },
             { key: 'settings-project', icon: <SettingOutlined />, label: t('项目设置') },
             { key: 'settings', icon: <SettingOutlined />, label: t('设置') },
             { type: 'divider' as const },
@@ -66,15 +61,13 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
                 icon: theme === 'dark' ? <SunOutlined /> : <MoonOutlined />,
                 label: theme === 'dark' ? t('浅色') : t('深色'),
             },
-            { key: 'language', label: language === 'en' ? '中文' : 'English' },
             { key: 'help', icon: <QuestionCircleOutlined />, label: t('操作与快捷键') },
         ],
         onClick: ({ key }: { key: string }) => {
-            if (key === 'new') setNewProjectOpen(true);
+            if (key === 'reset-project') setResetProjectOpen(true);
             else if (key === 'settings-project') setProjectOpen(true);
             else if (key === 'settings') setSettingsOpen(true);
             else if (key === 'theme') session.setTheme(theme === 'dark' ? 'light' : 'dark');
-            else if (key === 'language') setLanguage(language === 'en' ? 'zh-CN' : 'en');
             else if (key === 'help') setHelpOpen(true);
         },
     };
@@ -91,14 +84,6 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
             >
                 {t('场景')}
             </Button>
-            <div className="topbar__brand">
-                <span className="topbar__logo">D</span>
-                <div className="topbar__title">
-                    <strong>{t('导演台')}</strong>
-                    <small title={project.name}>{project.name}</small>
-                </div>
-            </div>
-
             <Segmented<ViewMode>
                 value={view}
                 onChange={(value) => session.setView(value)}
@@ -175,7 +160,7 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
                 <Dropdown menu={moreMenu} placement="bottomRight" trigger={['click']}>
                     <Button type="text" size="small" icon={<MoreOutlined />} aria-label={t('更多')} />
                 </Dropdown>
-                {newProjectOpen ? <NewProjectDialog open onClose={() => setNewProjectOpen(false)} /> : null}
+                {resetProjectOpen ? <ResetProjectDialog open onClose={() => setResetProjectOpen(false)} /> : null}
                 {projectOpen ? <ProjectDialog open onClose={() => setProjectOpen(false)} /> : null}
                 <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
             </div>
