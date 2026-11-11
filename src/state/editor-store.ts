@@ -4,9 +4,10 @@ import { createStarterProject } from './starter-project.ts';
 
 export type ViewMode = 'stage' | 'split' | 'shot';
 
-export type SidebarTab = 'scene' | 'assets';
+export type SidebarTab = 'scene' | 'assets' | 'shots';
 
-export type InspectorTab = 'base' | 'camera' | 'light' | 'actions' | 'pose' | 'path' | 'environment';
+export type InspectorTab =
+    'base' | 'camera' | 'light' | 'actions' | 'pose' | 'path' | 'environment' | 'spatial' | 'keys';
 
 export type TransformMode = 'translate' | 'rotate' | 'scale';
 

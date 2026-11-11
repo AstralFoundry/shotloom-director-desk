@@ -4,6 +4,9 @@ export interface StageLabel {
     id: string;
     name: string;
     color: string;
+    /** Entity kind, so the tag can show a matching icon. */
+    kind: 'actor' | 'crowd' | 'camera' | 'prop';
+    light: boolean;
     x: number;
     y: number;
     visible: boolean;

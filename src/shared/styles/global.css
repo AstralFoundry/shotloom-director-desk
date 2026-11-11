@@ -9,9 +9,10 @@
 :root {
     font-family: 'Inter Variable', Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
     font-size: 13px;
-    color: #ededed;
-    background: #000;
-    color-scheme: dark;
+    color: var(--ed-text-primary);
+    background: var(--ed-app-bg);
+    /* `color-scheme` is set from the theme runtime so native scrollbars and form
+       controls follow the active theme instead of staying dark in light mode. */
     font-synthesis: none;
     text-rendering: optimizeLegibility;
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
@@ -38,7 +39,7 @@ body,
 }
 
 body {
-    background: #000;
+    background: var(--ed-app-bg);
 }
 
 button,
@@ -53,16 +54,16 @@ canvas {
 }
 
 ::selection {
-    background: rgba(255, 255, 255, 0.22);
+    background: var(--ed-wash-6);
 }
 
 .ant-select-dropdown,
 .ant-dropdown-menu,
 .ant-popover .ant-popover-inner {
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid var(--ed-line-mid);
     border-radius: 10px;
-    background: #242424;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.44);
+    background: var(--ed-gp-field);
+    box-shadow: 0 12px 32px var(--ed-shadow);
 }
 
 .ant-select-dropdown .ant-select-item-option {
@@ -73,10 +74,10 @@ canvas {
 }
 
 .ant-select-dropdown .ant-select-item-option-active:not(.ant-select-item-option-disabled) {
-    background: #303030 !important;
+    background: var(--ed-gp-selected) !important;
 }
 
 .ant-select-dropdown .ant-select-item-option-selected:not(.ant-select-item-option-disabled) {
-    background: #383838 !important;
-    color: #f4f4f4 !important;
+    background: var(--ed-gp-selected) !important;
+    color: var(--ed-text-bright) !important;
 }

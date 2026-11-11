@@ -14,8 +14,11 @@ import { useEditorStore, type InspectorTab } from '@/state/editor-store.ts';
 import { inspectorTabsFor } from '@/state/inspector-tabs.ts';
 import { useProject, useSelectedEntity } from '@/state/use-editor.ts';
 import { ActionPresetPicker, MoreActionsSelect } from '@/features/timeline/preset-picker.tsx';
+import { KeyframePanel } from './keyframe-panel.tsx';
+import { SpatialCheckPanel } from '@/features/spatial/spatial-check-panel.tsx';
+import { ReferenceBackdropSection } from './reference-backdrop.tsx';
 
-export function InspectorPanel() {
+export function InspectorPanel({ resize }: { resize?: React.ReactNode }) {
     const t = useTranslation();
     const entity = useSelectedEntity();
     const tab = useEditorStore((state) => state.inspectorTab);
@@ -28,6 +31,8 @@ export function InspectorPanel() {
         { key: 'camera', label: t('镜头') },
         { key: 'light', label: t('照明') },
         { key: 'environment', label: t('环境') },
+        { key: 'keys', label: t('关键帧') },
+        { key: 'spatial', label: t('空间检查') },
     ];
     const available = inspectorTabsFor(entity);
     const visibleTabs = tabs.filter((item) => available.includes(item.key));
@@ -35,6 +40,7 @@ export function InspectorPanel() {
 
     return (
         <aside className={`inspector inspector--${entity?.kind ?? 'scene'}`} aria-label={t('属性面板')}>
+            {resize}
             <header className="inspector__header">
                 {entity ? (
                     <>
@@ -88,6 +94,10 @@ export function InspectorPanel() {
                     <PathPanel entity={entity} />
                 ) : activeTab === 'light' ? (
                     <LightPanel entity={entity} />
+                ) : activeTab === 'keys' ? (
+                    <KeyframePanel entity={entity} />
+                ) : activeTab === 'spatial' ? (
+                    <SpatialCheckPanel />
                 ) : (
                     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('该面板迁移中')} />
                 )}
@@ -776,6 +786,7 @@ function EnvironmentPanel() {
 
     return (
         <div className="stack">
+            <ReferenceBackdropSection />
             <FieldRow label={t('环境光')}>
                 <NumberField
                     value={numberAt(lighting.ambient, time)}

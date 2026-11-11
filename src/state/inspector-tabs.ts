@@ -4,7 +4,9 @@ import type { InspectorTab } from './editor-store.ts';
 
 /** Only show controls that can edit the selected object. */
 export function inspectorTabsFor(entity?: Entity): InspectorTab[] {
-    if (!entity) return ['environment'];
+    // The scene itself offers the environment and the range check; both operate on the whole
+    // project rather than on one selection.
+    if (!entity) return ['environment', 'spatial'];
 
     const capabilities = findAsset(entity.asset)?.capabilities;
     const tabs: InspectorTab[] = ['base'];
@@ -22,5 +24,7 @@ export function inspectorTabsFor(entity?: Entity): InspectorTab[] {
         tabs.push('pose');
     if (entity.camera) tabs.push('camera');
     if (entity.light) tabs.push('light');
+    // Keyframe editing applies to anything that can move, plus cameras with focal keys.
+    if (entity.locked !== undefined) tabs.push('keys');
     return tabs;
 }

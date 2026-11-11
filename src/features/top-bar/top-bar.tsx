@@ -1,15 +1,18 @@
 import {
     DownloadOutlined,
     FileAddOutlined,
+    MoreOutlined,
     PictureOutlined,
     QuestionCircleOutlined,
     RedoOutlined,
     SettingOutlined,
     MenuFoldOutlined,
     MenuUnfoldOutlined,
+    MoonOutlined,
+    SunOutlined,
     UndoOutlined,
 } from '@ant-design/icons';
-import { Button, Popover, Segmented, Tooltip } from 'antd';
+import { Button, Dropdown, Popover, Segmented, Tooltip } from 'antd';
 import { useState } from 'react';
 import { useLanguage, useTranslation } from '@/shared/i18n/use-translation.ts';
 import { setLanguage } from '@/shared/i18n/locale.ts';
@@ -20,6 +23,8 @@ import { ExportDialog } from '@/features/export/export-dialog.tsx';
 import { HelpPanel } from '@/features/dialogs/help-dialog.tsx';
 import { ProjectDialog } from '@/features/dialogs/project-dialog.tsx';
 import { NewProjectDialog } from '@/features/dialogs/new-project-dialog.tsx';
+import { SettingsDialog } from '@/features/settings/settings-dialog.tsx';
+import { getEditorTheme } from '@/app/providers/theme.ts';
 
 const VIEW_MODES: ViewMode[] = ['stage', 'split', 'shot'];
 
@@ -31,6 +36,7 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
     const [projectOpen, setProjectOpen] = useState(false);
     const [newProjectOpen, setNewProjectOpen] = useState(false);
     const [helpOpen, setHelpOpen] = useState(false);
+    const [settingsOpen, setSettingsOpen] = useState(false);
     const project = useProject();
     const view = useEditorStore((state) => state.view);
     const status = useEditorStore((state) => state.status);
@@ -39,12 +45,38 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
     useRevision();
     const canUndo = session.history.undoStack.length > 0;
     const canRedo = session.history.redoStack.length > 0;
-    const anyDialogOpen = exportOpen || newProjectOpen || projectOpen;
+    const anyDialogOpen = exportOpen || newProjectOpen || projectOpen || settingsOpen;
+    const theme = getEditorTheme();
 
     const labels: Record<ViewMode, string> = {
         stage: t('导演视角'),
         split: t('分屏'),
         shot: t('机位视角'),
+    };
+
+    /** Secondary actions live behind one menu so the bar stops overflowing on narrow screens. */
+    const moreMenu = {
+        items: [
+            { key: 'new', icon: <FileAddOutlined />, label: t('新建工程') },
+            { key: 'settings-project', icon: <SettingOutlined />, label: t('项目设置') },
+            { key: 'settings', icon: <SettingOutlined />, label: t('设置') },
+            { type: 'divider' as const },
+            {
+                key: 'theme',
+                icon: theme === 'dark' ? <SunOutlined /> : <MoonOutlined />,
+                label: theme === 'dark' ? t('浅色') : t('深色'),
+            },
+            { key: 'language', label: language === 'en' ? '中文' : 'English' },
+            { key: 'help', icon: <QuestionCircleOutlined />, label: t('操作与快捷键') },
+        ],
+        onClick: ({ key }: { key: string }) => {
+            if (key === 'new') setNewProjectOpen(true);
+            else if (key === 'settings-project') setProjectOpen(true);
+            else if (key === 'settings') setSettingsOpen(true);
+            else if (key === 'theme') session.setTheme(theme === 'dark' ? 'light' : 'dark');
+            else if (key === 'language') setLanguage(language === 'en' ? 'zh-CN' : 'en');
+            else if (key === 'help') setHelpOpen(true);
+        },
     };
 
     return (
@@ -74,9 +106,15 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
             />
 
             <div className="topbar__actions">
-                <span className={`save-status ${dirty ? 'save-status--dirty' : ''}`}>
+                {/* Fixed-width status slot: the label used to unmount when clean, which shifted
+                    every following button sideways on each autosave. */}
+                <span
+                    className={`save-status ${dirty ? 'save-status--dirty' : ''}`}
+                    title={status || t('自动保存')}
+                    aria-live="polite"
+                >
                     <i className="save-status__dot" />
-                    {status || t('自动保存')}
+                    <span className="save-status__text">{dirty ? status || t('自动保存') : t('已保存')}</span>
                 </span>
                 <Tooltip title={t('撤销 Ctrl+Z')}>
                     <Button
@@ -99,29 +137,27 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
                     />
                 </Tooltip>
                 <span className="topbar__divider" />
-                <Button size="small" icon={<PictureOutlined />} onClick={() => void session.snapshot()}>
-                    {t('导出图片')}
-                </Button>
+                <Tooltip title={t('导出图片')}>
+                    <Button
+                        size="small"
+                        icon={<PictureOutlined />}
+                        aria-label={t('导出图片')}
+                        onClick={() => void session.snapshot()}
+                    >
+                        <span className="topbar__label">{t('导出图片')}</span>
+                    </Button>
+                </Tooltip>
                 <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={() => setExportOpen(true)}>
-                    {t('导出运镜视频')}
+                    <span className="topbar__label">{t('导出运镜视频')}</span>
                 </Button>
                 {exportOpen ? <ExportDialog open onClose={() => setExportOpen(false)} /> : null}
-                <Tooltip title={t('新建工程')}>
-                    <Button
-                        type="text"
-                        size="small"
-                        icon={<FileAddOutlined />}
-                        aria-label={t('新建工程')}
-                        onClick={() => setNewProjectOpen(true)}
-                    />
-                </Tooltip>
-                <Tooltip title={t('项目设置')}>
+                <Tooltip title={t('设置')}>
                     <Button
                         type="text"
                         size="small"
                         icon={<SettingOutlined />}
-                        aria-label={t('项目设置')}
-                        onClick={() => setProjectOpen(true)}
+                        aria-label={t('设置')}
+                        onClick={() => setSettingsOpen(true)}
                     />
                 </Tooltip>
                 <Popover
@@ -136,16 +172,12 @@ export function TopBar({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean;
                 >
                     <Button type="text" size="small" icon={<QuestionCircleOutlined />} aria-label={t('操作与快捷键')} />
                 </Popover>
-                <Button
-                    type="text"
-                    size="small"
-                    onClick={() => setLanguage(language === 'en' ? 'zh-CN' : 'en')}
-                    title={t('切换界面语言')}
-                >
-                    {language === 'en' ? '中' : 'EN'}
-                </Button>
+                <Dropdown menu={moreMenu} placement="bottomRight" trigger={['click']}>
+                    <Button type="text" size="small" icon={<MoreOutlined />} aria-label={t('更多')} />
+                </Dropdown>
                 {newProjectOpen ? <NewProjectDialog open onClose={() => setNewProjectOpen(false)} /> : null}
                 {projectOpen ? <ProjectDialog open onClose={() => setProjectOpen(false)} /> : null}
+                <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
             </div>
         </header>
     );

@@ -1,5 +1,5 @@
 import './export-dialog.css';
-import { Button, Col, Input, Modal, Progress, Row, Select } from 'antd';
+import { Button, Col, Input, Modal, Progress, Row, Segmented, Select } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { FRAME_RATES, outputSize, type Project } from '@/core/model.ts';
 import { exportVideo } from '@/core/export.ts';
@@ -13,12 +13,15 @@ import { notify, notifyError, notifySuccess } from '@/shared/ui/feedback.ts';
 import { session } from '@/state/editor-session.ts';
 import { useEditorStore } from '@/state/editor-store.ts';
 import { useProject } from '@/state/use-editor.ts';
+import { shotSpans } from '@/features/shots/shot-list.tsx';
 
 type SaveMode = 'download' | 'disk';
 type VideoFormat = 'mp4' | 'webm';
 
 interface ExportForm {
     filename: string;
+    /** `single` renders one continuous take; `shots` writes one file per cut. */
+    mode: 'single' | 'shots';
     cameraId: string;
     start: number;
     end: number;
@@ -49,6 +52,7 @@ export function ExportDialog({ open, onClose }: { open: boolean; onClose: () => 
         const preferences = readExportPreferences();
         return {
             filename: project.name,
+            mode: 'single',
             cameraId: preview,
             start: 0,
             end: project.duration,
@@ -67,6 +71,8 @@ export function ExportDialog({ open, onClose }: { open: boolean; onClose: () => 
     const update = (patch: Partial<ExportForm>) => setForm((current) => ({ ...current, ...patch }));
 
     const cameras = project.entities.filter((entity) => entity.kind === 'camera');
+    /** Shots the per-cut export would produce, for the plan and for the summary. */
+    const shots = useMemo(() => shotSpans(project), [project]);
     const plan = useMemo(() => {
         try {
             const scene = {
@@ -76,22 +82,40 @@ export function ExportDialog({ open, onClose }: { open: boolean; onClose: () => 
                 fps: project.fps,
                 aspect: project.aspect as Project['aspect'],
             };
-            const jobs = planVideoExports(
-                [scene],
-                [{ sceneId: SCENE_ID, filename: form.filename }],
-                {
-                    size: Number(form.size),
-                    fps: form.fps === 'scene' ? 'scene' : Number(form.fps),
-                    format: form.format,
-                    monochrome: form.monochrome,
-                },
-                { start: form.start, end: form.end, cameraId: form.cameraId },
-            );
-            return { job: jobs[0] as ExportJob, error: '' };
+            const settings = {
+                size: Number(form.size),
+                fps: form.fps === 'scene' ? ('scene' as const) : Number(form.fps),
+                format: form.format,
+                monochrome: form.monochrome,
+            };
+            if (form.mode === 'shots') {
+                // One scene entry per shot so every cut becomes its own file. Each job carries a
+                // custom range, and `planVideoExports` requires exactly one selection per range,
+                // so the shots are planned one at a time and concatenated.
+                const jobs = shots
+                    .filter((shot) => shot.duration > 0)
+                    .map((shot) => {
+                        const [job] = planVideoExports(
+                            [scene],
+                            [{ sceneId: SCENE_ID, filename: `${form.filename}-镜头${shot.index + 1}` }],
+                            settings,
+                            { start: shot.start, end: shot.end, cameraId: shot.cameraId || 'program' },
+                        );
+                        return job;
+                    });
+                if (!jobs.length) throw Error('没有可导出的镜头');
+                return { jobs, job: jobs[0] as ExportJob, error: '' };
+            }
+            const jobs = planVideoExports([scene], [{ sceneId: SCENE_ID, filename: form.filename }], settings, {
+                start: form.start,
+                end: form.end,
+                cameraId: form.cameraId,
+            });
+            return { jobs, job: jobs[0] as ExportJob, error: '' };
         } catch (error) {
-            return { job: undefined, error: (error as Error).message };
+            return { jobs: [], job: undefined, error: (error as Error).message };
         }
-    }, [project, form]);
+    }, [project, form, shots]);
 
     // Live camera preview for the current export settings (serialized: one render at a time).
     const jobKey = plan.job
@@ -107,25 +131,28 @@ export function ExportDialog({ open, onClose }: { open: boolean; onClose: () => 
     useEffect(() => {
         if (!open || !plan.job || exporting) return;
         const engine = session.engineOrNull;
-        if (!engine) return;
+        const lease = session.renderLease;
+        if (!engine || !lease) return;
         let cancelled = false;
         const options = plan.job.options;
         const sample = Math.max(options.start, Math.min(time, options.end - 1 / options.fps));
-        const oldTime = engine.time;
         const oldMono = engine.monochrome;
-        engine.exporting = true;
         void (async () => {
             try {
                 const [width, height] = outputSize(project.aspect, 640);
-                engine.monochrome = options.monochrome;
-                await engine.prepareOutput(sample);
-                const canvas = engine.renderOutput(sample, width, height, options.cameraId);
-                if (!cancelled) setPreviewImage(canvas.toDataURL('image/png'));
+                // The export preview borrows the renderer like every other off-playhead frame;
+                // taking `exporting` directly would race the shot list and the space check.
+                const data = await lease.borrow(async () => {
+                    engine.monochrome = options.monochrome;
+                    engine.prepareOutput(sample);
+                    const canvas = engine.renderOutput(sample, width, height, options.cameraId);
+                    return canvas.toDataURL('image/png');
+                });
+                if (!cancelled) setPreviewImage(data);
             } catch {
                 if (!cancelled) setPreviewImage('');
             } finally {
                 engine.monochrome = oldMono;
-                engine.restorePreview(oldTime);
             }
         })();
         return () => {
@@ -142,38 +169,55 @@ export function ExportDialog({ open, onClose }: { open: boolean; onClose: () => 
           }
         : null;
 
+    /** Ask for one destination file; `undefined` means "fall back to a browser download". */
+    async function pickFile(job: ExportJob) {
+        if (form.save !== 'disk') return undefined;
+        const picker = (window as unknown as FilePickerWindow).showSaveFilePicker;
+        if (!picker) throw new Error('当前浏览器不支持另存为，请选择下载');
+        return picker({
+            suggestedName: job.filename,
+            types: [
+                {
+                    description: form.format === 'mp4' ? 'MP4 视频' : 'WebM 视频',
+                    accept: {
+                        [form.format === 'mp4' ? 'video/mp4' : 'video/webm']: [
+                            form.format === 'mp4' ? '.mp4' : '.webm',
+                        ],
+                    },
+                },
+            ],
+        });
+    }
+
     async function startExport() {
-        const job = plan.job;
+        const jobs = plan.jobs;
         const engine = session.engineOrNull;
-        if (!job || !engine || exporting) return;
+        if (!jobs.length || !engine || exporting) return;
         setExporting(true);
         setProgress(0);
         session.beginBusy();
         const controller = new AbortController();
         abortRef.current = controller;
         try {
-            let handle: FileSystemFileHandle | undefined;
-            if (form.save === 'disk') {
-                const picker = (window as unknown as FilePickerWindow).showSaveFilePicker;
-                if (!picker) throw new Error('当前浏览器不支持另存为，请选择下载');
-                handle = await picker({
-                    suggestedName: job.filename,
-                    types: [
-                        {
-                            description: form.format === 'mp4' ? 'MP4 视频' : 'WebM 视频',
-                            accept: {
-                                [form.format === 'mp4' ? 'video/mp4' : 'video/webm']: [
-                                    form.format === 'mp4' ? '.mp4' : '.webm',
-                                ],
-                            },
-                        },
-                    ],
-                });
-            }
             saveExportPreferences({ size: form.size, format: form.format, fps: form.fps });
-            const blob = await exportVideo(engine, job.options, controller.signal, setProgress, handle);
-            if (blob) download(blob, job.filename);
-            notifySuccess(t('已导出') + ' ' + job.filename);
+            let done = 0;
+            for (const job of jobs) {
+                controller.signal.throwIfAborted();
+                const handle = await pickFile(job);
+                const blob = await exportVideo(
+                    engine,
+                    job.options,
+                    controller.signal,
+                    (value) => setProgress((done + value) / jobs.length),
+                    handle,
+                );
+                if (blob) download(blob, job.filename);
+                done += 1;
+            }
+            setProgress(1);
+            notifySuccess(
+                jobs.length > 1 ? `${t('已导出')} ${jobs.length} ${t('个视频')}` : t('已导出') + ' ' + jobs[0].filename,
+            );
             onClose();
         } catch (error) {
             const name = (error as Error).name;
@@ -218,6 +262,20 @@ export function ExportDialog({ open, onClose }: { open: boolean; onClose: () => 
             <div className="export-layout">
                 <div className="export-fields">
                     <label className="export-field">
+                        <span>{t('导出方式')}</span>
+                        <Segmented
+                            block
+                            value={form.mode}
+                            disabled={exporting}
+                            onChange={(value) => update({ mode: value as ExportForm['mode'] })}
+                            options={[
+                                { value: 'single', label: t('整段视频') },
+                                { value: 'shots', label: `${t('按镜头分文件')} (${shots.length})` },
+                            ]}
+                        />
+                    </label>
+
+                    <label className="export-field">
                         <span>{t('文件名')}</span>
                         <Input
                             value={form.filename}
@@ -233,7 +291,7 @@ export function ExportDialog({ open, onClose }: { open: boolean; onClose: () => 
                         <Select
                             value={form.cameraId}
                             aria-label={t('输出内容')}
-                            disabled={exporting}
+                            disabled={exporting || form.mode === 'shots'}
                             onChange={(value) => update({ cameraId: value })}
                             options={[
                                 { value: 'program', label: t('按切镜输出') },

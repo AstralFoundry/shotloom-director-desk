@@ -267,8 +267,13 @@ export function TimelinePanel({
                             onClick={() => session.addCutAtPlayhead()}
                         />
                     </Tooltip>
-                    <span className="timecode" title={timecode(time, project.fps)}>
-                        {time.toFixed(1)}s <span>/ {project.duration.toFixed(1)}s</span>
+                    {/* Frame-exact readout: at 24 fps "4.0s" cannot express where a cut lands,
+                        so the primary readout is timecode and the seconds stay on hover. */}
+                    <span
+                        className="timecode"
+                        title={`${time.toFixed(2)}s / ${project.duration.toFixed(2)}s · ${project.fps} fps`}
+                    >
+                        {timecode(time, project.fps)} <span>/ {timecode(project.duration, project.fps)}</span>
                     </span>
                 </div>
 

@@ -112,8 +112,8 @@ export interface Entity {
     visible: boolean;
     locked: boolean;
     height: number;
-    build: 'slim' | 'normal' | 'broad';
-    gender: 'male' | 'female';
+    build: (typeof BUILDS)[number];
+    gender: (typeof GENDERS)[number];
     path: MotionPath | null;
     face: 'path' | 'fixed' | 'target';
     faceTarget: string;
@@ -160,6 +160,9 @@ export interface Project {
 }
 export const ASPECTS = ['9:16', '16:9', '21:9', '3:4', '4:3', '1:1'];
 export const FRAME_RATES = [24, 30, 50, 59, 60, 90, 120];
+/** Person build and gender are closed sets; catalogue reads them so the Agent can pick valid values. */
+export const BUILDS = ['slim', 'normal', 'broad'] as const;
+export const GENDERS = ['male', 'female'] as const;
 export const ACTIONS: Record<Action, string> = {
     idle: '站立 / 待机',
     walk: '走路',
@@ -405,8 +408,8 @@ export function assertProject(input: unknown): asserts input is Project {
         if (
             typeof e.visible !== 'boolean' ||
             typeof e.locked !== 'boolean' ||
-            !['slim', 'normal', 'broad'].includes(e.build) ||
-            !['male', 'female'].includes(e.gender) ||
+            !(BUILDS as readonly string[]).includes(e.build) ||
+            !(GENDERS as readonly string[]).includes(e.gender) ||
             !n(e.height) ||
             e.height < (isAnimalAsset(e.asset) ? 0.03 : 0.2) ||
             e.height > 10

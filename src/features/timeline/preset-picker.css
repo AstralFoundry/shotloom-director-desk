@@ -4,7 +4,7 @@
     gap: 10px;
     width: min(440px, calc(100vw - 32px));
     max-height: min(620px, calc(100vh - 90px));
-    color: #eeeeee;
+    color: var(--ed-text-primary);
 }
 
 .preset-picker--inline {
@@ -45,15 +45,15 @@
     border: 1px solid transparent;
     border-radius: 8px;
     background: transparent;
-    color: #ddd;
+    color: var(--ed-text-primary);
     text-align: left;
     cursor: pointer;
 }
 
 .preset-card:hover,
 .preset-card:focus-visible {
-    border-color: #666;
-    background: #252525;
+    border-color: var(--ed-text-a35);
+    background: var(--ed-gp-field);
 }
 
 .preset-card:disabled {
@@ -68,7 +68,7 @@
     aspect-ratio: 1.35;
     overflow: hidden;
     border-radius: 4px;
-    background: #111;
+    background: var(--ed-vp-stage-bg);
     object-fit: cover;
 }
 
@@ -87,6 +87,6 @@
 }
 
 .preset-card small {
-    color: #999;
+    color: var(--ed-text-a50);
     font-size: 11px;
 }

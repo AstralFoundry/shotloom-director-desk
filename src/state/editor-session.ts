@@ -7,6 +7,9 @@ import type { TimelineSelection } from '@/core/clip-editing.ts';
 import { selectedEntities, setSelectedEntities } from '@/core/editor/timeline-selection.ts';
 import { assertLockedEntitiesUnchanged } from '@/core/editor/invariants.ts';
 import { recordPositionKey } from '@/core/editor/position-keys.ts';
+import { runSpatialCheck } from '@/core/spatial/run-check.ts';
+import { RenderLease } from '@/core/editor/render-lease.ts';
+import type { SpatialIssue } from '@/core/spatial/checks.ts';
 import { editBoundTransform } from '@/core/animation/hand-binding.ts';
 import { freezeCamera } from '@/core/editor/camera-editing.ts';
 import { bindNavigation } from '@/core/editor/navigation.ts';
@@ -33,6 +36,8 @@ import { PathCommands } from './commands/path.ts';
 import { PoseCommands } from './commands/pose.ts';
 import { SceneCommands } from './commands/scene.ts';
 import type { CameraPresetId } from '@/core/cinematography/camera-presets.ts';
+import { setEditorTheme } from '@/core/editor/theme-state.ts';
+import { editorPreferences } from '@/core/editor/preferences.ts';
 import type { FramingName } from './commands/scene.ts';
 import { TimelineCommands } from './commands/timeline.ts';
 import type { EditorCommandHost } from './commands/host.ts';
@@ -48,6 +53,8 @@ const UI_TIME_STEP = 50;
 export class EditorSession {
     readonly history: SceneWorkspace;
     private engineRef: Engine | null = null;
+    /** Exclusive access to the renderer for viewers that borrow a different point in time. */
+    private lease: RenderLease | null = null;
     private transformError: Error | undefined;
     private cameraViewDragId: string | null = null;
     private clock = 0;
@@ -220,7 +227,14 @@ export class EditorSession {
             cameraViewEnd: (cancel) => this.endCameraViewDrag(cancel),
         });
         this.engineRef = engine;
+        this.lease = new RenderLease(engine);
         engine.jointNodesVisible = useEditorStore.getState().inspectorTab === 'pose';
+        // Restore persisted editing preferences before the first frame so a reload does not
+        // silently reset snapping or render quality.
+        const preferences = editorPreferences.current;
+        engine.setPlacementSnap(preferences.placementSnap);
+        engine.setObjectSnap(preferences.objectSnap);
+        engine.setPreviewQuality(preferences.previewQuality);
         this.navigation = bindNavigation({
             get engine() {
                 return engine;
@@ -501,6 +515,15 @@ export class EditorSession {
         this.apply({ busy });
     }
 
+    /**
+     * Exclusive renderer access for features that need a frame at another time or camera.
+     *
+     * Null until the engine is mounted, so callers must check before borrowing.
+     */
+    get renderLease(): RenderLease | null {
+        return this.lease;
+    }
+
     extendDuration(): void {
         const project = this.project;
         for (const e of project.entities) {
@@ -754,6 +777,21 @@ export class EditorSession {
         this.path.removePathPoint(index);
     }
 
+    /** Record the selected entity's current position as a waypoint key at the playhead. */
+    recordPositionKeyAtPlayhead(): boolean {
+        return this.entity.recordPositionKeyAtPlayhead();
+    }
+
+    /** Record the selected camera's focal length at the playhead. */
+    recordFocalKeyAtPlayhead(): boolean {
+        return this.scene.recordFocalKeyAtPlayhead();
+    }
+
+    /** Remove one focal key; dropping to a single key restores a fixed lens. */
+    removeFocalKey(index: number): boolean {
+        return this.scene.removeFocalKey(index);
+    }
+
     holdPathPoint(): void {
         this.path.holdPathPoint();
     }
@@ -768,6 +806,62 @@ export class EditorSession {
 
     snapshot(): Promise<void> {
         return this.scene.snapshot();
+    }
+
+    renderPreview(input: { seconds?: number; cameraId?: string; size?: number }) {
+        return this.scene.renderPreview(input);
+    }
+
+    exportShot(span: { index: number; cameraId: string; start: number; end: number }): Promise<void> {
+        return this.scene.exportShot(span);
+    }
+
+    /**
+     * Run the spatial check and return the findings as data.
+     *
+     * The panel renders a report for a person; the host Agent needs the same evidence as
+     * structure so it can decide what to fix without parsing prose. Both go through the same
+     * sampler, so they can never disagree about what is wrong.
+     */
+    async runSpatialCheck(
+        input: {
+            start?: number;
+            end?: number;
+            sampleRate?: number;
+            cameraId?: string;
+            includeObstacles?: boolean;
+            includeFraming?: boolean;
+        },
+        signal?: AbortSignal,
+        progress?: (fraction: number) => void,
+    ): Promise<{ issues: SpatialIssue[]; truncated: boolean; samples: number; range: { start: number; end: number } }> {
+        const engine = this.engineOrNull;
+        const lease = this.lease;
+        if (!engine || !lease) throw Error('导演台画布尚未准备好');
+        if (useEditorStore.getState().busy || engine.exporting) throw Error('导演台正在执行其他任务，请稍后重试');
+        const start = input.start === undefined ? 0 : input.start;
+        const end = input.end === undefined ? this.project.duration : input.end;
+        const controller = new AbortController();
+        // A caller-supplied signal (the panel's Cancel button, or a host timeout) aborts this run
+        // and nothing else; with no signal the sweep simply runs to completion.
+        const onAbort = () => controller.abort();
+        signal?.addEventListener('abort', onAbort, { once: true });
+        const result = await runSpatialCheck(
+            engine,
+            this.project,
+            {
+                start,
+                end,
+                sampleRate: input.sampleRate === undefined ? 4 : input.sampleRate,
+                cameraId: input.cameraId ?? 'program',
+                includeObstacles: input.includeObstacles !== false,
+                includeFraming: input.includeFraming !== false,
+            },
+            controller.signal,
+            progress ?? (() => undefined),
+            lease,
+        ).finally(() => signal?.removeEventListener('abort', onAbort));
+        return { ...result, range: { start, end } };
     }
 
     updateProjectSettings(patch: { name?: string; aspect?: string; fps?: number }): boolean {
@@ -796,6 +890,149 @@ export class EditorSession {
 
     toggleGrid(): void {
         this.scene.toggleGrid();
+    }
+
+    /**
+     * Switch the desk theme.
+     *
+     * The 3D viewports read their colours from the theme tokens at build time, so a theme
+     * change has to rebuild the helper geometry (floor, grid) and repaint the background.
+     * The scene graph itself is untouched, so this stays cheap and keeps undo history intact.
+     */
+    setTheme(value: 'light' | 'dark', persist = true): void {
+        setEditorTheme(value, persist);
+        const engine = this.engineRef;
+        if (engine) {
+            engine.rebuild(this.project);
+            engine.requestResize();
+        }
+    }
+
+    /** Grid snap step in metres (0 disables it). Applies to the move gizmo and dragged props. */
+    setPlacementSnap(step: number): void {
+        editorPreferences.set('placementSnap', step);
+        this.engineRef?.setPlacementSnap(step);
+    }
+
+    /** Snap a dragged prop to nearby object surfaces and boundaries. */
+    setObjectSnap(enabled: boolean): void {
+        editorPreferences.set('objectSnap', enabled);
+        this.engineRef?.setObjectSnap(enabled);
+    }
+
+    /** Draft quality lowers the viewport pixel ratio; useful on integrated GPUs. */
+    setPreviewQuality(value: 'full' | 'draft'): void {
+        editorPreferences.set('previewQuality', value);
+        const engine = this.engineRef;
+        if (!engine) return;
+        engine.setPreviewQuality(value);
+        engine.requestResize();
+    }
+
+    /** Object label density over the stage. */
+    setLabelMode(value: 'off' | 'selected' | 'all'): void {
+        editorPreferences.set('labelMode', value);
+        // Labels are projected during the frame loop; force one overlay refresh now so the
+        // change is visible without waiting for the next pointer move.
+        this.engineRef?.refreshHelpers();
+        this.changed(false);
+    }
+
+    /**
+     * Ask the host to detach the reference backdrop edge.
+     *
+     * The desk never owns canvas edges, so removal is a request: the host removes the edge and
+     * pushes a fresh panorama (or a clear) back. Returns false when no host is connected, which
+     * lets the caller still clear the local preview.
+     */
+    requestBackdropRemoval(edgeId: string): boolean {
+        if (!this.backdropRemoval) return false;
+        this.backdropRemoval(edgeId);
+        return true;
+    }
+
+    /** Registered once by the host bridge; undefined when running standalone. */
+    private backdropRemoval: ((edgeId: string) => void) | null = null;
+
+    registerBackdropRemoval(handler: ((edgeId: string) => void) | null): void {
+        this.backdropRemoval = handler;
+    }
+
+    /** Commit a whole-document scene change and project its active scene into the editor. */
+    replaceSceneDocument(document: ReturnType<SceneWorkspace['document']>, label: string): boolean {
+        const state = useEditorStore.getState();
+        if (state.busy || this.history.pending || state.pathDraft || this.engineRef?.exporting) return false;
+        this.history.replace(document, this.history.context, label);
+        const project = this.history.project();
+        const view = this.history.restoredView;
+        this.clock = view?.time ?? 0;
+        this.apply({
+            project,
+            time: this.clock,
+            selected: view?.selected ?? project.entities[0]?.id ?? '',
+            preview: view?.preview ?? 'program',
+            playing: false,
+            selectedClipId: null,
+            selectedPathSection: null,
+            selectedPoint: -1,
+            selectedJoint: '',
+        });
+        this.changed(true);
+        return true;
+    }
+
+    /**
+     * The whole document, ready to hand to another desk instance.
+     *
+     * The workspace view and the canvas node each keep their own copy of a scene; without an
+     * explicit hand-off a scene built in one is invisible in the other.
+     */
+    exportSceneDocument(): unknown {
+        return this.history.document();
+    }
+
+    /**
+     * Replace the whole document with one produced by `exportSceneDocument`.
+     *
+     * Refuses while an edit or an export is in flight: replacing the document mid-transaction
+     * would strand the open history entry.
+     */
+    importSceneDocument(document: unknown, label = '载入外部场景'): boolean {
+        const state = useEditorStore.getState();
+        if (state.busy || this.history.pending || state.pathDraft || this.engineRef?.exporting) return false;
+        try {
+            const project = this.history.reset(document);
+            const selected = this.history.restoredSelection ?? project.entities[0]?.id ?? '';
+            this.clock = 0;
+            this.apply({
+                project,
+                selected,
+                time: 0,
+                preview: 'program',
+                playing: false,
+                selectedClipId: null,
+                selectedPathSection: null,
+                selectedPoint: -1,
+                selectedJoint: '',
+            });
+            this.changed(true);
+            notifySuccess(`${label}：${project.name}`);
+            return true;
+        } catch (error) {
+            notifyError(`无法载入场景：${(error as Error).message}`);
+            return false;
+        }
+    }
+
+    /** Summary the host can show on a node card without opening the desk. */
+    sceneSummary(): { actors: number; cameras: number; shots: number; duration: number } {
+        const project = this.project;
+        return {
+            actors: project.entities.filter((entity) => entity.kind === 'actor' || entity.kind === 'crowd').length,
+            cameras: project.entities.filter((entity) => entity.kind === 'camera').length,
+            shots: Math.max(project.cuts.length, 1),
+            duration: project.duration,
+        };
     }
 
     viewHome(): void {

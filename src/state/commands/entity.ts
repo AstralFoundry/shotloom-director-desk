@@ -14,6 +14,21 @@ import type { EditorCommandHost } from './host.ts';
 export class EntityCommands {
     constructor(private readonly host: EditorCommandHost) {}
 
+    /**
+     * Record the selected entity's current position as a waypoint key at the playhead.
+     *
+     * Position keys reuse the motion-path waypoints on purpose: a second animation system
+     * would drift from the path the user already sees drawn in the viewport.
+     */
+    recordPositionKeyAtPlayhead(): boolean {
+        const e = this.host.current();
+        if (!e || e.locked) return false;
+        const time = this.host.clock;
+        return this.host.change(() => {
+            recordPositionKey(e, time, entityPosition(e, time).toArray() as Vec3, this.host.project.fps);
+        });
+    }
+
     renameEntity(name: string): void {
         const e = this.host.current();
         const next = name.trim();

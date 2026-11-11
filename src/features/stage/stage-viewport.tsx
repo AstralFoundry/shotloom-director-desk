@@ -1,13 +1,16 @@
 import {
     AimOutlined,
     BorderOutlined,
+    BulbOutlined,
     CameraOutlined,
+    CompressOutlined,
     DragOutlined,
     ExpandOutlined,
     HomeOutlined,
     AppstoreOutlined,
     BranchesOutlined,
     RotateRightOutlined,
+    ThunderboltOutlined,
 } from '@ant-design/icons';
 import { Button, Select, Tooltip } from 'antd';
 import { useEffect, useRef, useState } from 'react';
@@ -15,10 +18,13 @@ import { activeCameraId } from '@/core/timeline.ts';
 import { numberAt } from '@/core/animation/channels.ts';
 import { useTranslation } from '@/shared/i18n/use-translation.ts';
 import { ObjectLabels } from './object-labels.tsx';
+import { FramingGuides } from './framing-guides.tsx';
+import { PreviousShotOverlay } from './previous-shot-overlay.tsx';
 import { StageContextMenu, type ContextMenuTarget } from './stage-context-menu.tsx';
 import { session } from '@/state/editor-session.ts';
 import { useEditorStore, type TransformMode } from '@/state/editor-store.ts';
 import { useProject, useSelectedEntity } from '@/state/use-editor.ts';
+import { usePreferences } from '@/state/use-preferences.ts';
 
 const TOOL_MODES: Array<{ mode: TransformMode; label: string; icon: React.ReactNode; shortcut: string }> = [
     { mode: 'translate', label: '移动', icon: <DragOutlined />, shortcut: '1' },
@@ -38,6 +44,7 @@ export function StageViewport() {
     const pathDraft = useEditorStore((state) => state.pathDraft);
     const pathDrawMode = useEditorStore((state) => state.pathDrawMode);
     const pathSurfaceMode = useEditorStore((state) => state.pathSurfaceMode);
+    const preferences = usePreferences();
     const selectedEntity = useSelectedEntity();
     const draftEntity = pathDraft ? project.entities.find((entity) => entity.id === pathDraft) : undefined;
     const stageRef = useRef<HTMLDivElement>(null);
@@ -132,6 +139,8 @@ export function StageViewport() {
                     </span>
                 </div>
                 <div className="viewport__canvas viewport__canvas--shot" ref={shotRef}>
+                    <FramingGuides aspect={project.aspect} />
+                    {preferences.showPreviousShot ? <PreviousShotOverlay cameraId={shotCameraId ?? ''} /> : null}
                     <span className="viewport__shot-hint">{t('拖动画面调整机位方向')}</span>
                 </div>
             </section>
@@ -199,16 +208,57 @@ export function StageViewport() {
                     </Tooltip>
                 </div>
                 <span className="viewport__toolbar-separator" aria-hidden="true" />
-                <Tooltip title={t('网格')}>
-                    <Button
-                        size="small"
-                        className={gridVisible ? 'is-active' : ''}
-                        icon={<AppstoreOutlined />}
-                        aria-label={t('网格')}
-                        aria-pressed={gridVisible}
-                        onClick={() => session.toggleGrid()}
-                    />
-                </Tooltip>
+                <div className="viewport__tool-group">
+                    <Tooltip title={t('网格')}>
+                        <Button
+                            size="small"
+                            className={gridVisible ? 'is-active' : ''}
+                            icon={<AppstoreOutlined />}
+                            aria-label={t('网格')}
+                            aria-pressed={gridVisible}
+                            onClick={() => session.toggleGrid()}
+                        />
+                    </Tooltip>
+                    {/* The engine could always snap; these two controls are what made the
+                        documented behaviour reachable from the interface. */}
+                    <Tooltip title={t('网格吸附')}>
+                        <Select
+                            size="small"
+                            className="viewport__select"
+                            value={String(preferences.placementSnap)}
+                            aria-label={t('网格吸附')}
+                            onChange={(value) => session.setPlacementSnap(Number(value))}
+                            options={[
+                                { value: '0', label: t('网格吸附关') },
+                                { value: '0.1', label: t('吸附 0.1m') },
+                                { value: '0.5', label: t('吸附 0.5m') },
+                                { value: '1', label: t('吸附 1m') },
+                            ]}
+                        />
+                    </Tooltip>
+                    <Tooltip title={t('物体吸附')}>
+                        <Button
+                            size="small"
+                            className={preferences.objectSnap ? 'is-active' : ''}
+                            icon={<CompressOutlined />}
+                            aria-label={t('物体吸附')}
+                            aria-pressed={preferences.objectSnap}
+                            onClick={() => session.setObjectSnap(!preferences.objectSnap)}
+                        />
+                    </Tooltip>
+                    <Tooltip title={t('预览质量')}>
+                        <Button
+                            size="small"
+                            className={preferences.previewQuality === 'draft' ? 'is-active' : ''}
+                            icon={preferences.previewQuality === 'draft' ? <ThunderboltOutlined /> : <BulbOutlined />}
+                            aria-label={t('预览质量')}
+                            aria-pressed={preferences.previewQuality === 'draft'}
+                            onClick={() =>
+                                session.setPreviewQuality(preferences.previewQuality === 'draft' ? 'full' : 'draft')
+                            }
+                        />
+                    </Tooltip>
+                </div>
             </div>
         </div>
     );

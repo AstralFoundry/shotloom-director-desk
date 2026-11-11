@@ -1,6 +1,6 @@
 import { DeleteOutlined } from '@ant-design/icons';
 import { App } from 'antd';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { InspectorPanel } from '@/features/inspector/inspector-panel.tsx';
 import { useTranslation } from '@/shared/i18n/use-translation.ts';
 import { hasBlockingLayer, shouldIgnoreShortcut, isTypingTarget } from '@/shared/lib/keyboard.ts';
@@ -9,8 +9,11 @@ import { SceneSidebar } from '@/features/sidebar/scene-sidebar.tsx';
 import { StageViewport } from '@/features/stage/stage-viewport.tsx';
 import { TimelinePanel } from '@/features/timeline/timeline-panel.tsx';
 import { TopBar } from '@/features/top-bar/top-bar.tsx';
+import { PanelResize } from '@/features/shell/panel-resize.tsx';
+import { editorPreferences } from '@/core/editor/preferences.ts';
 import { session } from '@/state/editor-session.ts';
 import { useEditorStore } from '@/state/editor-store.ts';
+import { usePreferences } from '@/state/use-preferences.ts';
 import './editor-page.css';
 
 /**
@@ -34,8 +37,8 @@ function deleteSelectedClip(onDeleted: () => void): boolean {
 export function EditorPage() {
     const t = useTranslation();
     const { modal } = App.useApp();
+    const preferences = usePreferences();
     const [sidebarOpen, setSidebarOpen] = useState(false);
-    const [timelineHeight, setTimelineHeight] = useState<number | null>(null);
     /**
      * One frame loop for the whole editor: advance playback, let the engine draw, then
      * publish the playhead at ~20 Hz so React is not re-rendered on every frame.
@@ -52,6 +55,16 @@ export function EditorPage() {
         request = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(request);
     }, []);
+
+    // Panel geometry lives in preferences so it survives a reload; the shell reads it as
+    // CSS variables and falls back to the responsive defaults when a value is null.
+    const shellStyle = useMemo(() => {
+        const style: Record<string, string> = {};
+        if (preferences.sidebarWidth !== null) style['--sidebar-width'] = `${preferences.sidebarWidth}px`;
+        if (preferences.inspectorWidth !== null) style['--inspector-width'] = `${preferences.inspectorWidth}px`;
+        if (preferences.timelineHeight !== null) style['--timeline-height'] = `${preferences.timelineHeight}px`;
+        return style as React.CSSProperties;
+    }, [preferences.sidebarWidth, preferences.inspectorWidth, preferences.timelineHeight]);
 
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {
@@ -152,21 +165,38 @@ export function EditorPage() {
     }, [modal, t]);
 
     return (
-        <div
-            className={`editor ${sidebarOpen ? 'editor--sidebar-open' : 'editor--sidebar-closed'}`}
-            style={
-                timelineHeight === null
-                    ? undefined
-                    : ({ '--timeline-height': `${timelineHeight}px` } as React.CSSProperties)
-            }
-        >
+        <div className={`editor ${sidebarOpen ? 'editor--sidebar-open' : 'editor--sidebar-closed'}`} style={shellStyle}>
             <TopBar sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((open) => !open)} />
             <div className="editor__body">
-                <SceneSidebar />
+                <SceneSidebar
+                    resize={
+                        <PanelResize
+                            side="right"
+                            preferenceKey="sidebarWidth"
+                            label={t('左侧资源栏宽度')}
+                            min={200}
+                            max={520}
+                        />
+                    }
+                />
                 <StageViewport />
-                <InspectorPanel />
+                <InspectorPanel
+                    resize={
+                        <PanelResize
+                            side="left"
+                            preferenceKey="inspectorWidth"
+                            label={t('右侧属性栏宽度')}
+                            min={240}
+                            max={560}
+                            invert
+                        />
+                    }
+                />
             </div>
-            <TimelinePanel onHeightChange={setTimelineHeight} onHeightReset={() => setTimelineHeight(null)} />
+            <TimelinePanel
+                onHeightChange={(height) => editorPreferences.set('timelineHeight', height)}
+                onHeightReset={() => editorPreferences.set('timelineHeight', null)}
+            />
         </div>
     );
 }

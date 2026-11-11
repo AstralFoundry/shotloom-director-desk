@@ -1,3 +1,4 @@
+import { numberAt } from '@/core/animation/channels.ts';
 import * as THREE from 'three';
 import { findAsset } from '@/core/asset-catalog.ts';
 import { cameraPresetPath, type CameraPresetId } from '@/core/cinematography/camera-presets.ts';
@@ -14,6 +15,9 @@ import type { EditorCommandHost } from './host.ts';
 
 /** Standard shot sizes used by the quick framing presets. */
 export type FramingName = '全景' | '中景' | '近景' | '特写';
+
+/** Catalogue surface: the exact names `apply_framing` accepts, so callers never guess. */
+export const FRAMING_NAMES: FramingName[] = ['全景', '中景', '近景', '特写'];
 
 const FRAMING_HEIGHTS: Record<FramingName, number> = { 全景: 2.2, 中景: 1.15, 近景: 0.65, 特写: 0.3 };
 
@@ -96,7 +100,104 @@ export class SceneCommands {
         }
     }
 
-    /** Project-level settings; aspect/fps rebuild the shot renderer. */
+    /**
+     * Render one frame and hand the pixels back to the caller instead of downloading it.
+     *
+     * The host Agent cannot judge composition, occlusion, lighting or clipping from scene
+     * JSON alone, so it needs the same evidence a person gets from the viewport. Unlike
+     * `snapshot`, this writes no file, and it renders at a modest size because the frame is
+     * only an inspection aid.
+     */
+    async renderPreview(input: {
+        seconds?: number;
+        cameraId?: string;
+        size?: number;
+    }): Promise<{ dataUrl: string; seconds: number; cameraId: string; width: number; height: number }> {
+        const engine = this.host.engine;
+        if (!engine) throw new Error('导演台画布尚未准备好');
+        if (useEditorStore.getState().busy || engine.exporting) throw new Error('导演台正在执行其他任务，请稍后重试');
+        const state = useEditorStore.getState();
+        const seconds = input.seconds === undefined ? state.time : input.seconds;
+        if (!Number.isFinite(seconds) || seconds < 0 || seconds > this.host.project.duration)
+            throw new Error('截图时间超出场景时长');
+        const cameraId = input.cameraId === undefined ? state.preview : input.cameraId;
+        const size = input.size === undefined ? 640 : input.size;
+        if (![640, 1280].includes(size)) throw new Error('size 只能是 640 或 1280');
+        const at = this.host.clock;
+        this.host.patch({ playing: false, busy: true });
+        engine.exporting = true;
+        try {
+            const [width, height] = outputSize(this.host.project.aspect, size);
+            await engine.prepareOutput(seconds);
+            const canvas = engine.renderOutput(seconds, width, height, cameraId);
+            return { dataUrl: canvas.toDataURL('image/png'), seconds, cameraId, width, height };
+        } finally {
+            this.host.patch({ busy: false });
+            engine.restorePreview(at);
+        }
+    }
+
+    /**
+     * Export one shot as a still.
+     *
+     * The shot list needs a per-shot deliverable, and a still at the shot's midpoint is what
+     * feeds the next canvas node: it is the frame a video model would be conditioned on.
+     */
+    async exportShot(span: { index: number; cameraId: string; start: number; end: number }): Promise<void> {
+        const engine = this.host.engine;
+        if (!engine || useEditorStore.getState().busy || engine.exporting) return;
+        const at = span.start + Math.max(0, span.end - span.start) / 2;
+        const originalTime = engine.time;
+        this.host.patch({ playing: false, busy: true });
+        engine.exporting = true;
+        try {
+            const [width, height] = outputSize(this.host.project.aspect, 1920);
+            await engine.prepareOutput(at);
+            const canvas = engine.renderOutput(at, width, height, span.cameraId || 'program');
+            const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+            if (!blob) throw new Error('未能生成画面');
+            const cameraName = this.host.project.entities.find((entity) => entity.id === span.cameraId)?.name ?? '';
+            download(blob, `${this.host.project.name}-镜头${span.index + 1}${cameraName ? '-' + cameraName : ''}.png`);
+            notifySuccess('已导出镜头画面');
+        } catch (error) {
+            notifyError((error as Error).message);
+        } finally {
+            this.host.patch({ busy: false });
+            engine.restorePreview(originalTime);
+        }
+    }
+
+    /** Record the selected camera's focal length at the playhead. */
+    recordFocalKeyAtPlayhead(): boolean {
+        const camera = this.host.current()?.camera;
+        if (!camera) return false;
+        const time = Math.round(this.host.clock * this.host.project.fps) / this.host.project.fps;
+        return this.host.change(() => {
+            const keys = camera.focalKeys ? [...camera.focalKeys] : [];
+            const current = numberAt({ keys }, time);
+            const existing = keys.findIndex((key) => Math.abs(key.time - time) < 1e-7);
+            if (existing >= 0) keys[existing] = { ...keys[existing], value: current };
+            else keys.push({ time, value: current });
+            keys.sort((a, b) => a.time - b.time);
+            // A single key would silently freeze the lens everywhere, so keep the plain value
+            // until there are at least two keys to interpolate between.
+            camera.focalKeys = keys.length > 1 ? keys : undefined;
+            camera.focal = current;
+        });
+    }
+
+    /** Remove one focal key; dropping to a single key restores a fixed lens. */
+    removeFocalKey(index: number): boolean {
+        const camera = this.host.current()?.camera;
+        if (!camera?.focalKeys) return false;
+        const removed = camera.focalKeys[index];
+        return this.host.change(() => {
+            const keys = camera.focalKeys!.filter((_, position) => position !== index);
+            camera.focalKeys = keys.length > 1 ? keys : undefined;
+            if (!camera.focalKeys) camera.focal = removed.value;
+        });
+    }
+
     /** Frame the target with a standard shot size, then preview that camera. */
     applyFraming(name: FramingName): boolean {
         const camera = this.host.current();

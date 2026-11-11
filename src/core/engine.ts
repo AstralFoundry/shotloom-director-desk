@@ -20,6 +20,7 @@ import { transitionGroundingAt } from './animation/transition-plan.ts';
 import { SceneModels } from './resources/scene-models.ts';
 import { isExternalModel } from './resources/project-resources.ts';
 import { makeCrowd } from './assets/crowd.ts';
+import { makeEditorCamera } from './assets/editor-camera.ts';
 import * as T from 'three';
 import { objectBounds, findObjectSnap, type SnapBounds } from './editor/object-snapping.ts';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -38,6 +39,8 @@ import { jointAngles } from './assets/joint-schema.ts';
 import type { Joint } from './model.ts';
 import { samplePose } from './timeline.ts';
 import { isAnimalAsset } from './asset-catalog.ts';
+import { getEditorTheme, themeColor } from './editor/theme-state.ts';
+import { editorPreferences } from './editor/preferences.ts';
 export function configureCamera(camera: T.PerspectiveCamera, focal: number, aspect: number) {
     camera.aspect = aspect;
     camera.filmGauge = 36;
@@ -60,7 +63,18 @@ interface Callbacks {
     cameraViewChange: (rotation: Vec3) => void;
     cameraViewEnd: (cancel?: boolean) => void;
 }
+/** Director viewport colours follow the editor theme; shot output follows scene lighting. */
+const vpToken = (name: string) => themeColor(name);
+
 export class Engine {
+    /** Backdrop pushed by the embedding host; shown only in the shot view. */
+    private hostPanorama: T.Texture | null = null;
+
+    setHostPanorama(texture: T.Texture | null) {
+        this.hostPanorama = texture;
+        this.render();
+    }
+
     async prepareOutput(time: number, signal?: AbortSignal) {
         this.sample(time);
         signal?.throwIfAborted();
@@ -115,6 +129,8 @@ export class Engine {
     dragging = false;
     pickingEnabled = true;
     gridVisible = true;
+    private lightGroundPreview = false;
+    private lightShotFloor: T.Mesh | null = null;
     placementSnap = 0;
     objectSnapEnabled = false;
     objectSnapTarget = '';
@@ -414,23 +430,9 @@ export class Engine {
                     crowd.rigs.forEach((rig, i) => this.externalModels.registerHuman(e, rig, `${e.id}:${i}`));
                     this.crowdRigs.set(e.id, crowd.rigs);
                 } else if (e.kind === 'camera') {
-                    root = new T.Group();
+                    root = makeEditorCamera();
                     const cam = new T.PerspectiveCamera();
                     this.cameras.set(e.id, cam);
-                    const body = new T.Mesh(
-                        new T.BoxGeometry(0.15, 0.11, 0.2),
-                        new T.MeshBasicMaterial({ color: e.color, wireframe: true }),
-                    );
-                    root.add(body);
-                    const cone = new T.Mesh(
-                        new T.ConeGeometry(0.15, 0.25, 4, 1, true),
-                        new T.MeshBasicMaterial({ color: e.color, wireframe: true }),
-                    );
-                    cone.rotation.x = Math.PI / 2;
-                    cone.rotation.y = Math.PI / 4;
-                    cone.position.z = -0.19;
-                    root.add(cone);
-                    root.traverse((o) => o.layers.set(1));
                     this.cameraVisuals.set(e.id, root);
                 } else root = makeProp(e);
                 root.traverse((o) => (o.userData.entityId = e.id));
@@ -633,6 +635,24 @@ export class Engine {
     }
     getShotCamera(id = this.previewId) {
         return this.cameras.get(this.cameraEntity(id).id)!;
+    }
+    /**
+     * World-space bounds of one entity's model, or null when it has no geometry.
+     *
+     * Spatial checks run against the live scene rather than re-deriving poses from JSON, so
+     * imported models, foot contact and action blending are all accounted for. The caller must
+     * have sampled the requested time first.
+     */
+    worldBounds(id: string): T.Box3 | null {
+        const model = this.models.get(id);
+        if (!model) return null;
+        model.updateWorldMatrix(true, true);
+        const box = new T.Box3().setFromObject(model);
+        return box.isEmpty() ? null : box;
+    }
+    /** Camera currently rendering the shot view for `id`. */
+    shotCameraFor(id = this.previewId) {
+        return this.getShotCamera(id);
     }
     select(id: string, point = -1) {
         if (this.selectedJoint && (id !== this.jointOwner || point >= 0)) this.selectJoint('');
@@ -843,6 +863,10 @@ export class Engine {
     }
     refreshHelpers() {
         this.needsRender = true;
+        if (this.lightShotFloor) {
+            disposeTree(this.lightShotFloor);
+            this.lightShotFloor = null;
+        }
         this.contactMarker.root?.removeFromParent();
         while (this.helpers.children.length) disposeTree(this.helpers.children[0]);
         while (this.pathHelpers.children.length) disposeTree(this.pathHelpers.children[0]);
@@ -851,31 +875,46 @@ export class Engine {
         // Editor-only spatial reference. It is not a scene entity, so deleting a
         // placed ground prop never removes the floor/grid used for navigation.
         const workingY = workingElevation(this.project);
-        const groundTop = this.project.entities
-            .filter((entity) => entity.asset === 'ground' && editorEntityVisible(this.project, entity))
-            .reduce<number | null>((highest, entity) => {
-                const model = this.models.get(entity.id);
-                if (!model) return highest;
-                model.updateWorldMatrix(true, true);
-                const top = new T.Box3().setFromObject(model).max.y;
-                return highest === null ? top : Math.max(highest, top);
-            }, null);
-        // A placed ground prop supplies the visible surface. Only provide the
-        // editor backdrop when there is no ground prop, so two floors never overlap.
-        if (groundTop === null) {
+        const visibleGround = this.project.entities.filter(
+            (entity) => entity.asset === 'ground' && editorEntityVisible(this.project, entity),
+        );
+        const groundTop = visibleGround.reduce<number | null>((highest, entity) => {
+            const model = this.models.get(entity.id);
+            if (!model) return highest;
+            model.updateWorldMatrix(true, true);
+            const top = new T.Box3().setFromObject(model).max.y;
+            return highest === null ? top : Math.max(highest, top);
+        }, null);
+        // The starter ground is dark scene content. In the light editor, use a
+        // temporary floor for the stage and the live shot preview.
+        this.lightGroundPreview =
+            getEditorTheme() === 'light' &&
+            visibleGround.length > 0 &&
+            visibleGround.every((entity) => entity.color.toLowerCase() === '#1d2127');
+        if (groundTop === null || this.lightGroundPreview) {
             const floor = new T.Mesh(
                 new T.PlaneGeometry(160, 160),
-                new T.MeshBasicMaterial({ color: '#11151b', side: T.DoubleSide, depthWrite: false }),
+                new T.MeshBasicMaterial({ color: vpToken('vp-floor'), side: T.DoubleSide, depthWrite: false }),
             );
             floor.rotation.x = -Math.PI / 2;
-            floor.position.y = workingY - 0.025;
+            floor.position.y = this.lightGroundPreview ? groundTop! + 0.006 : workingY - 0.025;
             this.helpers.add(floor);
+        }
+        if (this.lightGroundPreview) {
+            this.lightShotFloor = new T.Mesh(
+                new T.PlaneGeometry(160, 160),
+                new T.MeshBasicMaterial({ color: vpToken('vp-floor'), side: T.DoubleSide }),
+            );
+            this.lightShotFloor.rotation.x = -Math.PI / 2;
+            this.lightShotFloor.position.y = groundTop! + 0.006;
+            this.lightShotFloor.visible = false;
+            this.scene.add(this.lightShotFloor);
         }
         const grid = new T.GridHelper(
             this.project.room.enabled ? 20 : 80,
             this.project.room.enabled ? 20 : 80,
-            '#355262',
-            '#253844',
+            vpToken('vp-grid-major'),
+            vpToken('vp-grid-minor'),
         );
         grid.position.y = (groundTop ?? workingY) + 0.012;
         grid.visible = this.gridVisible;
@@ -886,7 +925,7 @@ export class Engine {
         if (e && editorEntityVisible(this.project, e)) {
             const root = this.models.get(e.id);
             if (root && e.kind !== 'camera') {
-                this.selectionBox = new T.BoxHelper(root, '#5a9bb8');
+                this.selectionBox = new T.BoxHelper(root, vpToken('vp-selection'));
                 this.helpers.add(this.selectionBox);
             }
             if (e.path) {
@@ -946,7 +985,7 @@ export class Engine {
         this.helpers.traverse((o) => o.layers.set(1));
         this.pathHelpers.traverse((o) => o.layers.set(1));
     }
-    private prepareView(editor: boolean, id = this.previewId) {
+    private prepareView(editor: boolean, id = this.previewId, output = false) {
         const rig = this.rigs.get(this.selected),
             selected = this.project.entities.find((e) => e.id === this.selected);
         this.jointNodes.bind(
@@ -965,9 +1004,11 @@ export class Engine {
             const root = this.models.get(e.id);
             if (!root) continue;
             root.visible = editor
-                ? editorEntityVisible(this.project, e)
-                : shotEntityVisible(this.project, e, cameraEntity.camera);
+                ? editorEntityVisible(this.project, e) && !(this.lightGroundPreview && e.asset === 'ground')
+                : shotEntityVisible(this.project, e, cameraEntity.camera) &&
+                  !(this.lightGroundPreview && !output && e.asset === 'ground');
         }
+        if (this.lightShotFloor) this.lightShotFloor.visible = !editor && !output;
         this.contactMarker.update(this.project.entities, this.models);
         const room = this.project.room;
         this.roomGroup.visible = room.enabled;
@@ -985,9 +1026,18 @@ export class Engine {
             const rig = this.rigs.get(cameraEntity.camera!.targetId);
             if (rig) rig.head.visible = false;
         }
-        this.scene.background = new T.Color(
-            editor ? '#080808' : (this.project.lighting?.background ?? DEFAULT_SHOT_BACKGROUND),
-        );
+        this.scene.background =
+            !editor && this.hostPanorama
+                ? this.hostPanorama
+                : new T.Color(
+                      editor
+                          ? vpToken('vp-stage-bg')
+                          : !output &&
+                              getEditorTheme() === 'light' &&
+                              (this.project.lighting?.background ?? DEFAULT_SHOT_BACKGROUND) === DEFAULT_SHOT_BACKGROUND
+                            ? vpToken('vp-shot-bg')
+                            : (this.project.lighting?.background ?? DEFAULT_SHOT_BACKGROUND),
+                  );
     }
     resize() {
         const ratio = Math.min(window.devicePixelRatio, 1.5) * (this.previewQuality === 'draft' ? 0.65 : 1);
@@ -1034,7 +1084,7 @@ export class Engine {
         this.shotRenderer.setPixelRatio(1);
         this.shotRenderer.setSize(width, height, false);
         // Same physical gate as preview. Integer output pixels only affect resolution, never camera framing.
-        this.prepareView(false, cameraId);
+        this.prepareView(false, cameraId, true);
         this.renderShot(cameraId);
         return this.shotRenderer.domElement;
     }
@@ -1187,23 +1237,34 @@ export class Engine {
     getProjectedLabels() {
         const w = this.stage.clientWidth,
             h = this.stage.clientHeight;
+        const mode = editorPreferences.current.labelMode;
+        if (mode === 'off') return [];
         return this.project.entities
-            .filter((e) => editorEntityVisible(this.project, e) && (e.kind === 'actor' || e.kind === 'camera'))
+            .filter((e) => {
+                if (!editorEntityVisible(this.project, e)) return false;
+                // Labels were limited to actors and cameras, which left props and lights with no
+                // marker in the viewport at all. The preference decides the density instead.
+                if (mode === 'selected') return e.id === this.selected;
+                return true;
+            })
             .map((e) => {
-                const p = this.models
-                    .get(e.id)!
-                    .position.clone()
-                    .add(new T.Vector3(0, e.kind === 'actor' ? e.height + 0.16 : 0.25, 0));
+                const model = this.models.get(e.id);
+                if (!model) return null;
+                const labelHeight = e.kind === 'actor' || e.kind === 'crowd' ? e.height + 0.16 : 0.25;
+                const p = model.position.clone().add(new T.Vector3(0, labelHeight, 0));
                 p.project(this.editorCamera);
                 return {
                     id: e.id,
                     name: e.name.split(' · ')[0],
                     color: e.color,
+                    kind: e.kind,
+                    light: Boolean(e.light),
                     x: (p.x * 0.5 + 0.5) * w,
                     y: (-0.5 * p.y + 0.5) * h,
                     visible: p.z >= -1 && p.z <= 1 && Math.abs(p.x) < 1 && Math.abs(p.y) < 1,
                 };
-            });
+            })
+            .filter((label): label is NonNullable<typeof label> => label !== null);
     }
     projectionSignature(id = this.previewId) {
         const c = this.getShotCamera(id);

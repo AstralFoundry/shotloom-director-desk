@@ -19,6 +19,7 @@ import { useProject } from '@/state/use-editor.ts';
 import type { Entity } from '@/core/model.ts';
 import { AssetBrowser } from './asset-browser.tsx';
 import { ModelImportDialog } from '@/features/model-import/model-import-dialog.tsx';
+import { ShotList } from '@/features/shots/shot-list.tsx';
 
 const KIND_LABELS: Partial<Record<Entity['kind'], string>> = {
     actor: '人物',
@@ -41,7 +42,7 @@ function sceneGroup(entity: Entity): (typeof SCENE_GROUPS)[number]['key'] {
     return 'prop';
 }
 
-export function SceneSidebar() {
+export function SceneSidebar({ resize }: { resize?: React.ReactNode }) {
     const t = useTranslation();
     const project = useProject();
     const selected = useEditorStore((state) => state.selected);
@@ -55,30 +56,38 @@ export function SceneSidebar() {
 
     return (
         <aside className="sidebar" aria-label={t('场景面板')}>
+            {resize}
             <Tabs
                 size="small"
                 activeKey={tab}
                 onChange={(key) =>
-                    useEditorStore.getState().patch({ sidebarTab: key === 'assets' ? 'assets' : 'scene' })
+                    useEditorStore
+                        .getState()
+                        .patch({ sidebarTab: key === 'assets' ? 'assets' : key === 'shots' ? 'shots' : 'scene' })
                 }
                 items={[
                     { key: 'scene', label: t('场景') },
                     { key: 'assets', label: t('添加') },
+                    { key: 'shots', label: t('镜头') },
                 ]}
             />
 
-            <Input
-                id="scene-search"
-                size="small"
-                allowClear
-                prefix={<SearchOutlined />}
-                placeholder={tab === 'assets' ? t('搜索白模资产') : t('搜索场景对象')}
-                value={query}
-                onChange={(event) => useEditorStore.getState().patch({ query: event.target.value })}
-            />
+            {tab !== 'shots' ? (
+                <Input
+                    id="scene-search"
+                    size="small"
+                    allowClear
+                    prefix={<SearchOutlined />}
+                    placeholder={tab === 'assets' ? t('搜索白模资产') : t('搜索场景对象')}
+                    value={query}
+                    onChange={(event) => useEditorStore.getState().patch({ query: event.target.value })}
+                />
+            ) : null}
 
             <div className="sidebar__body">
-                {tab === 'assets' ? (
+                {tab === 'shots' ? (
+                    <ShotList onExport={(shot) => session.exportShot(shot)} />
+                ) : tab === 'assets' ? (
                     <AssetBrowser />
                 ) : (
                     <div className="scene-groups">
