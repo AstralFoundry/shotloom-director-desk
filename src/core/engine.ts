@@ -887,8 +887,12 @@ export class Engine {
         }, null);
         // The starter ground is dark scene content. In the light editor, use a
         // temporary floor for the stage and the live shot preview.
+        // `groundTop` is null until the ground models finish loading, so a ground entity that
+        // exists but has no model yet must not count: `groundTop!` would otherwise place the
+        // floor at NaN metres.
         this.lightGroundPreview =
             getEditorTheme() === 'light' &&
+            groundTop !== null &&
             visibleGround.length > 0 &&
             visibleGround.every((entity) => entity.color.toLowerCase() === '#1d2127');
         if (groundTop === null || this.lightGroundPreview) {
@@ -1304,6 +1308,12 @@ export class Engine {
         disposeTree(this.roomGroup);
         disposeTree(this.helpers);
         disposeTree(this.pathHelpers);
+        // The light-theme floor lives on the scene, not in `helpers`, so nothing above releases
+        // it; `scene.clear()` only detaches, leaving its geometry and material on the GPU.
+        if (this.lightShotFloor) {
+            disposeTree(this.lightShotFloor);
+            this.lightShotFloor = null;
+        }
         this.selectionBox?.dispose();
         this.scene.clear();
         for (const renderer of [this.editorRenderer, this.shotRenderer]) {

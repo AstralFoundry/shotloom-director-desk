@@ -904,6 +904,10 @@ export class EditorSession {
         const engine = this.engineRef;
         if (engine) {
             engine.rebuild(this.project);
+            // The light theme swaps the ground for a temporary floor that lives on the scene.
+            // `rebuild` alone would leave the previous theme's floor in place, so the helpers are
+            // rebuilt too — that is what creates and disposes the theme-specific floor.
+            engine.refreshHelpers();
             engine.requestResize();
         }
     }
