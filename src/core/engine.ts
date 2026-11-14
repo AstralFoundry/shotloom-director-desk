@@ -1,3 +1,5 @@
+import { SceneEffects } from './editor/scene-effects.ts';
+import { editorPreferences as effectPreferences } from './editor/preferences.ts';
 import { SceneLighting } from './lighting/runtime.ts';
 import { DEFAULT_SHOT_BACKGROUND } from './lighting/model.ts';
 import { installWallTransmission, isWallEntity } from './lighting/wall-transmission.ts';
@@ -7,6 +9,7 @@ import { FreehandPathInput } from './editor/freehand-path-input.ts';
 import { memberSample } from './navigation/member-paths.ts';
 import { pathDrawingPosition } from './editor/path-drawing-position.ts';
 import { cameraLookAt } from './animation/camera-look.ts';
+import { applyEntityRotation } from './animation/entity-rotation.ts';
 import { numberAt } from './animation/channels.ts';
 import { InitialPoseRuntime } from './scenes/initial-pose-runtime.ts';
 import { inheritedPoseAt } from './scenes/initial-pose.ts';
@@ -22,7 +25,7 @@ import { isExternalModel } from './resources/project-resources.ts';
 import { makeCrowd } from './assets/crowd.ts';
 import { makeEditorCamera } from './assets/editor-camera.ts';
 import * as T from 'three';
-import { objectBounds, findObjectSnap, type SnapBounds } from './editor/object-snapping.ts';
+import { localObjectBounds, objectBounds, findObjectSnap, surfaceDropPosition, type SnapBounds } from './editor/object-snapping.ts';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import type { Rig } from './assets.ts';
@@ -41,6 +44,7 @@ import { samplePose } from './timeline.ts';
 import { isAnimalAsset } from './asset-catalog.ts';
 import { getEditorTheme, themeColor } from './editor/theme-state.ts';
 import { editorPreferences } from './editor/preferences.ts';
+import type { PlanFraming } from './editor/plan-view.ts';
 export function configureCamera(camera: T.PerspectiveCamera, focal: number, aspect: number) {
     camera.aspect = aspect;
     camera.filmGauge = 36;
@@ -129,6 +133,7 @@ export class Engine {
     dragging = false;
     pickingEnabled = true;
     gridVisible = true;
+    private cameraMarkerBounds = new T.Box3();
     private lightGroundPreview = false;
     private lightShotFloor: T.Mesh | null = null;
     placementSnap = 0;
@@ -376,7 +381,15 @@ export class Engine {
         this.rebuild(project);
     }
     private renderer() {
-        const r = new T.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
+        // Centimetre-scale close-ups and kilometre-scale stage views share these
+        // renderers. Linear depth loses millimetre-separated floor surfaces when
+        // the camera pulls back, producing moving stripes / mosaic patches.
+        const r = new T.WebGLRenderer({
+            antialias: true,
+            alpha: false,
+            preserveDrawingBuffer: true,
+            logarithmicDepthBuffer: true,
+        });
         r.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
         r.shadowMap.enabled = true;
         r.shadowMap.type = T.PCFSoftShadowMap;
@@ -495,6 +508,7 @@ export class Engine {
                         }
                     });
             }
+            if (!e.handBinding) applyEntityRotation(root, e, time);
         }
         this.scene.updateMatrixWorld(true);
         for (const e of this.project.entities)
@@ -524,6 +538,7 @@ export class Engine {
                             if (this.externalModels.sampleHuman(entity, at, id, phase)) applyHumanPose(rig, entity, at);
                             else animateHuman(rig, entity, at, phase);
                         }
+                        applyEntityRotation(root, entity, at);
                         root.updateWorldMatrix(true, true);
                         root.updateMatrixWorld(true);
                     };
@@ -541,7 +556,8 @@ export class Engine {
                 e.kind === 'actor' &&
                 e.visible &&
                 !inheritedPoseAt(e, time) &&
-                e.footContact &&
+                (e.footContact === true ||
+                    (e.footContact !== false && !e.external && !isAnimalAsset(e.asset) && sampledAction(e, time).action === 'run')) &&
                 ['idle', 'walk', 'run', 'wave', 'point', 'turn'].includes(sampledAction(e, time).action),
         );
         if (contactActors.length) {
@@ -567,6 +583,8 @@ export class Engine {
             if (e.handBinding) {
                 const root = this.models.get(e.id)!;
                 applyHandBinding(root, e.handBinding, this.handFrame(e.handBinding));
+                applyEntityRotation(root, e, time);
+                root.updateWorldMatrix(true, true);
                 root.visible =
                     e.visible && !!this.project.entities.find((a) => a.id === e.handBinding!.actorId)?.visible;
             }
@@ -602,6 +620,7 @@ export class Engine {
                 }
             } else if (c.aim === 'manual') camera.rotation.set(...e.rotation);
             else camera.lookAt(this.targetPosition(e));
+            applyEntityRotation(camera, e, time);
             configureCamera(
                 camera,
                 c.focalKeys ? numberAt({ keys: c.focalKeys }, time) : c.focal,
@@ -649,6 +668,10 @@ export class Engine {
         model.updateWorldMatrix(true, true);
         const box = new T.Box3().setFromObject(model);
         return box.isEmpty() ? null : box;
+    }
+    localBounds(id: string): T.Box3 | null {
+        const model = this.models.get(id);
+        return model ? localObjectBounds(model) : null;
     }
     /** Camera currently rendering the shot view for `id`. */
     shotCameraFor(id = this.previewId) {
@@ -829,6 +852,11 @@ export class Engine {
     snapObjectPosition(id: string, position: Vec3, axes = 'XYZ'): Vec3 {
         const entity = this.project.entities.find((e) => e.id === id),
             root = this.models.get(id);
+        if (effectPreferences.current.surfaceDrop && entity && !entity.handBinding && ['prop', 'actor'].includes(entity.kind) && root && this.selectedPoint < 0 && /[XZ]/.test(axes)) {
+            const targets = this.project.entities.filter(e => e.id !== id && e.kind === 'prop' && !e.light && editorEntityVisible(this.project, e)).flatMap(e => this.models.get(e.id) ?? []);
+            const snapped = surfaceDropPosition(root, position, targets);
+            if (snapped) return snapped;
+        }
         if (!this.objectSnapEnabled || entity?.kind !== 'prop' || !root || this.selectedPoint >= 0) return position;
         const bounds = objectBounds(root, id, entity.name);
         if (!bounds) return position;
@@ -1011,6 +1039,13 @@ export class Engine {
                 ? editorEntityVisible(this.project, e) && !(this.lightGroundPreview && e.asset === 'ground')
                 : shotEntityVisible(this.project, e, cameraEntity.camera) &&
                   !(this.lightGroundPreview && e.asset === 'ground');
+            // A camera captured from the current view surrounds the editor's eye.
+            // Hide its solid marker only while the eye intersects it, otherwise its
+            // body/lens occludes the whole stage. The shot camera remains available.
+            if (editor && root.visible && e.kind === 'camera') {
+                this.cameraMarkerBounds.setFromObject(root).expandByScalar(this.editorCamera.near);
+                if (this.cameraMarkerBounds.containsPoint(this.editorCamera.position)) root.visible = false;
+            }
         }
         if (this.lightShotFloor) this.lightShotFloor.visible = !editor;
         this.contactMarker.update(this.project.entities, this.models);
@@ -1075,7 +1110,7 @@ export class Engine {
             if (o instanceof T.CameraHelper) o.update();
         });
         this.prepareView(true);
-        if (this.stage.clientWidth) this.editorRenderer.render(this.scene, this.editorCamera);
+        if (this.stage.clientWidth) this.renderScene(this.editorRenderer, this.editorCamera);
         this.prepareView(false);
         if (this.shot.clientWidth) {
             this.renderShot(this.previewId);
@@ -1088,7 +1123,55 @@ export class Engine {
         this.shotRenderer.setSize(width, height, false);
         // Match the live shot, including its default background and floor treatment.
         this.prepareView(false, cameraId);
+        const camera = this.getShotCamera(cameraId);
+        configureCamera(camera, camera.getFocalLength(), width / height);
         this.renderShot(cameraId);
+        return this.shotRenderer.domElement;
+    }
+    /**
+     * Straight-down orthographic view of the set, cut horizontally like an architectural plan.
+     *
+     * Everything above `cutHeight` is clipped so ceiling slabs, beams and lintels do not hide the
+     * rooms and doorways show as gaps. A clipped wall is open on top, which single-sided materials
+     * would render as nothing, so materials are double-sided for this one frame and restored after.
+     * The camera keeps the default layer, so editor helpers (layer 1) stay out, as in a shot.
+     */
+    renderPlan(time: number, framing: PlanFraming, cutHeight: number) {
+        this.sample(time);
+        this.shotRenderer.setPixelRatio(1);
+        this.shotRenderer.setSize(framing.pixels.width, framing.pixels.height, false);
+        this.prepareView(false);
+        const top = cutHeight + 50;
+        const camera = new T.OrthographicCamera(
+            -framing.width / 2, framing.width / 2, framing.height / 2, -framing.height / 2, 0.1, top + 500,
+        );
+        camera.position.set(framing.centerX, top, framing.centerZ);
+        camera.up.set(0, 0, -1);
+        camera.lookAt(framing.centerX, 0, framing.centerZ);
+        camera.updateProjectionMatrix();
+        camera.updateMatrixWorld(true);
+        const sides: Array<[T.Material, T.Side]> = [];
+        this.scene.traverse((object) => {
+            const mesh = object as T.Mesh;
+            if (!mesh.isMesh) return;
+            for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+                if (material.side === T.DoubleSide) continue;
+                sides.push([material, material.side]);
+                material.side = T.DoubleSide;
+                material.needsUpdate = true;
+            }
+        });
+        const clipping = this.shotRenderer.clippingPlanes;
+        this.shotRenderer.clippingPlanes = [new T.Plane(new T.Vector3(0, -1, 0), cutHeight)];
+        try {
+            this.renderScene(this.shotRenderer, camera);
+        } finally {
+            this.shotRenderer.clippingPlanes = clipping;
+            for (const [material, side] of sides) {
+                material.side = side;
+                material.needsUpdate = true;
+            }
+        }
         return this.shotRenderer.domElement;
     }
     restorePreview(time: number) {
@@ -1119,9 +1202,17 @@ export class Engine {
         if (!target) return;
         this.focusBounds(new T.Box3().setFromObject(target));
     }
+    private effects = new Map<T.WebGLRenderer, SceneEffects>();
+    private renderScene(renderer: T.WebGLRenderer, camera: T.Camera) {
+        const preferences = effectPreferences.current;
+        if (!preferences.ambientOcclusion && !preferences.outline) { renderer.render(this.scene, camera); return; }
+        let effects = this.effects.get(renderer);
+        if (!effects) { effects = new SceneEffects(renderer, this.scene, camera); this.effects.set(renderer, effects); }
+        effects.render(this.scene, camera, preferences.ambientOcclusion, preferences.outline);
+    }
     private renderShot(id: string) {
         const camera = this.getShotCamera(id);
-        this.shotRenderer.render(this.scene, camera);
+        this.renderScene(this.shotRenderer, camera);
     }
     focusBounds(bounds: T.Box3) {
         if (bounds.isEmpty()) return;
@@ -1315,6 +1406,8 @@ export class Engine {
         }
         this.selectionBox?.dispose();
         this.scene.clear();
+        this.effects.forEach(effect => effect.dispose());
+        this.effects.clear();
         for (const renderer of [this.editorRenderer, this.shotRenderer]) {
             renderer.dispose();
             renderer.domElement.remove();

@@ -1,14 +1,22 @@
+import { directorContext } from '@/core/director-context.ts';
 import { numberAt } from '@/core/animation/channels.ts';
 import * as THREE from 'three';
 import { findAsset } from '@/core/asset-catalog.ts';
-import { cameraPresetPath, type CameraPresetId } from '@/core/cinematography/camera-presets.ts';
+import { CAMERA_PRESETS, cameraPresetPath, type CameraPresetId } from '@/core/cinematography/camera-presets.ts';
+import { compileCampath } from '@/core/cinematography/campath.ts';
 import { libraryPreferences } from '@/core/assets/library-preferences.ts';
 import { workingElevation } from '@/core/building/floors.ts';
-import { entityPosition } from '@/core/timeline.ts';
+import { CAMERA_PLACEMENTS, createPlacedCamera, type CameraPlacementId } from '@/core/cinematography/camera-placements.ts';
+import { entityYaw, entityPosition } from '@/core/timeline.ts';
 import { ASPECTS, FRAME_RATES, COLORS, clip, entity, outputSize, type Project, type Vec3 } from '@/core/model.ts';
 import type { CameraConfig } from '@/core/model.ts';
 import { defaultLighting, type LightingConfig } from '@/core/lighting/model.ts';
-import { download } from '@/core/storage.ts';
+import { deliverMedia } from '@/core/host-delivery.ts';
+import { assetParameters, validateAssetParameters } from '@/core/assets/parameters.ts';
+import { captureModelViews, inspectModel, MODEL_INSPECTION_VIEWS, type ModelInspectionView } from '@/core/editor/model-inspection.ts';
+import { drawPlanOverlay, planFraming, type PlanAnnotations, type PlanArea } from '@/core/editor/plan-view.ts';
+import { compareImages, type Pixels } from '@/core/editor/compare-image.ts';
+import { getReferenceBackdrop } from '@/state/reference-backdrop.ts';
 import { notifyError, notifySuccess } from '@/shared/ui/feedback.ts';
 import { useEditorStore } from '../editor-store.ts';
 import type { EditorCommandHost } from './host.ts';
@@ -26,12 +34,13 @@ export class SceneCommands {
     constructor(private readonly host: EditorCommandHost) {}
 
     /** Place a catalogue asset on the ground under the orbit target. */
-    addAsset(assetId: string): boolean {
+    addAsset(assetId: string): { entityId: string; name: string; position: Vec3; bounds: { min: number[]; max: number[]; size: number[] } | null } | false {
         const asset = findAsset(assetId);
         const engine = this.host.engine;
         if (!asset || !engine) return false;
         const target = engine.orbit.target;
         const elevation = workingElevation(this.host.project);
+        let createdId = '';
         const added = this.host.change(() => {
             const e = entity(asset.kind, asset.id, asset.name, engine.snapPosition([target.x, elevation, target.z]));
             e.position[1] = elevation;
@@ -45,13 +54,25 @@ export class SceneCommands {
                 e.clips = [clip('idle', 0, this.host.project.duration)];
             }
             this.host.project.entities.push(e);
+            createdId = e.id;
             this.host.patch({ selected: e.id, inspectorTab: e.light ? 'light' : 'base' });
         });
-        if (added) {
-            libraryPreferences.used(assetId);
-            engine.select(useEditorStore.getState().selected);
-        }
-        return added;
+        if (!added) return false;
+        libraryPreferences.used(assetId);
+        engine.select(useEditorStore.getState().selected);
+        const created = this.host.project.entities.find((item) => item.id === createdId)!;
+        // The measured world box answers "how tall is this thing and where does it sit" in the
+        // same reply that created it; without it the Agent has to re-read or inspect afterwards.
+        const world = engine.worldBounds(createdId);
+        return {
+            entityId: created.id,
+            name: created.name,
+            position: created.position,
+            bounds: world ? {
+                min: world.min.toArray(), max: world.max.toArray(),
+                size: world.getSize(new THREE.Vector3()).toArray(),
+            } : null,
+        };
     }
 
     addCamera(fromView = false): void {
@@ -78,19 +99,61 @@ export class SceneCommands {
         this.host.engine?.select(useEditorStore.getState().selected);
     }
 
-    async snapshot(): Promise<void> {
+    /** One history entry owns creation, selection and preview of a shot placement. */
+    addCameraPlacement(presetId: CameraPlacementId): boolean {
+        const engine = this.host.engine;
+        if (!engine) return false;
+        const preset = CAMERA_PLACEMENTS.find((item) => item.id === presetId);
+        if (!preset) return false;
+        const selected = this.host.current();
+        const subject = selected?.camera
+            ? this.host.project.entities.find((item) => item.id === selected.camera!.targetId)
+                ?? this.host.project.entities.find((item) => item.kind === 'actor')
+            : selected ?? this.host.project.entities.find((item) => item.kind === 'actor');
+        const position = subject ? entityPosition(subject, this.host.clock) : engine.orbit.target.clone();
+        const targetHeight = subject ? subject.height * 0.65 : 0;
+        const target = position.clone().add(new THREE.Vector3(0, targetHeight, 0));
+        const source = useEditorStore.getState().view === 'shot' && this.host.project.entities.some((item) => item.camera)
+            ? engine.getShotCamera()
+            : engine.editorCamera;
+        const reference = source.clone();
+        reference.filmGauge = 36;
+        const camera = createPlacedCamera({
+            presetId,
+            name: `${preset.label} · ${this.host.project.entities.filter((item) => item.camera).length + 1}`,
+            target: target.toArray() as Vec3,
+            subject: subject ? {
+                id: subject.id, position: position.toArray() as Vec3,
+                yaw: entityYaw(subject, this.host.clock, this.host.project), targetHeight,
+            } : undefined,
+            currentView: {
+                position: source.position.toArray() as Vec3,
+                rotation: [source.rotation.x, source.rotation.y, source.rotation.z],
+                focal: THREE.MathUtils.clamp(reference.getFocalLength(), 8, 300),
+            },
+        });
+        const applied = this.host.change(() => {
+            this.host.project.entities.push(camera);
+            engine.previewId = camera.id;
+            this.host.patch({ selected: camera.id, inspectorTab: 'camera', preview: camera.id });
+        });
+        if (applied) engine.select(camera.id);
+        return applied;
+    }
+
+    async snapshot(size?: [number, number]): Promise<void> {
         const engine = this.host.engine;
         if (!engine || useEditorStore.getState().busy) return;
         const at = useEditorStore.getState().time;
         this.host.patch({ playing: false, busy: true });
         engine.exporting = true;
         try {
-            const [width, height] = outputSize(this.host.project.aspect, 1920);
+            const [width, height] = size ?? outputSize(this.host.project.aspect, 1920);
             await engine.prepareOutput(at);
             const canvas = engine.renderOutput(at, width, height, useEditorStore.getState().preview);
             const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
             if (!blob) throw new Error('未能生成截图');
-            download(blob, `${this.host.project.name}-${at.toFixed(2)}s.png`);
+            await deliverMedia(blob, `${this.host.project.name}-${at.toFixed(2)}s.png`, 'image', { ...directorContext(this.host.project, at, at, useEditorStore.getState().preview), aspect: size ? `${width}:${height}` : this.host.project.aspect });
             notifySuccess('已导出当前画面');
         } catch (error) {
             notifyError((error as Error).message);
@@ -137,6 +200,325 @@ export class SceneCommands {
         }
     }
 
+    /** Inspect several real timeline frames as one labeled image without exporting media. */
+    async renderPreviewSheet(input: { timesSec: number[]; cameraId?: string }) {
+        const engine = this.host.engine;
+        if (!engine) throw new Error('导演台画布尚未准备好');
+        if (useEditorStore.getState().busy || engine.exporting) throw new Error('导演台正在执行其他任务，请稍后重试');
+        if (!Array.isArray(input.timesSec) || input.timesSec.length < 1 || input.timesSec.length > 8 ||
+            input.timesSec.some(seconds => !Number.isFinite(seconds) || seconds < 0 || seconds > this.host.project.duration)) {
+            throw new Error('timesSec 需要 1 至 8 个场景时长内的秒数');
+        }
+        const timesSec = [...input.timesSec].sort((a, b) => a - b);
+        const cameraId = input.cameraId ?? useEditorStore.getState().preview;
+        const [frameWidth, frameHeight] = outputSize(this.host.project.aspect, 640);
+        const cellWidth = 320;
+        const cellHeight = Math.round(cellWidth * frameHeight / frameWidth);
+        const columns = Math.min(4, timesSec.length);
+        const rows = Math.ceil(timesSec.length / columns);
+        const gap = 6;
+        const sheet = document.createElement('canvas');
+        sheet.width = columns * cellWidth + (columns + 1) * gap;
+        sheet.height = rows * cellHeight + (rows + 1) * gap;
+        const context = sheet.getContext('2d');
+        if (!context) throw new Error('无法创建导演台预览拼图');
+        context.fillStyle = '#17191d';
+        context.fillRect(0, 0, sheet.width, sheet.height);
+        const at = this.host.clock;
+        this.host.patch({ playing: false, busy: true });
+        engine.exporting = true;
+        try {
+            for (const [index, seconds] of timesSec.entries()) {
+                await engine.prepareOutput(seconds);
+                const frame = engine.renderOutput(seconds, frameWidth, frameHeight, cameraId);
+                const x = gap + index % columns * (cellWidth + gap);
+                const y = gap + Math.floor(index / columns) * (cellHeight + gap);
+                context.drawImage(frame, x, y, cellWidth, cellHeight);
+                const label = `${Number(seconds.toFixed(3))}s`;
+                context.font = '600 13px sans-serif';
+                const badgeWidth = Math.ceil(context.measureText(label).width) + 14;
+                context.fillStyle = 'rgba(0, 0, 0, 0.78)';
+                context.fillRect(x, y + cellHeight - 24, badgeWidth, 24);
+                context.fillStyle = '#fff';
+                context.textBaseline = 'middle';
+                context.fillText(label, x + 7, y + cellHeight - 12);
+            }
+            return { dataUrl: sheet.toDataURL('image/jpeg', 0.88), timesSec, cameraId,
+                width: sheet.width, height: sheet.height, columns, rows };
+        } finally {
+            this.host.patch({ busy: false });
+            engine.restorePreview(at);
+        }
+    }
+
+    /**
+     * Straight-down plan of the set with a labelled metric grid, actor routes and camera spots.
+     *
+     * Layouts are usually handed over as a top-down picture. Without the same view of the build,
+     * a layout can only be re-derived from that picture, never compared with it — and re-deriving
+     * produced a new coordinate mapping each time, so finished walls were torn down and rebuilt.
+     * Nothing here touches the project.
+     */
+    async renderPlan(input: { cutHeight?: number; area?: PlanArea; seconds?: number; size?: number }) {
+        const engine = this.host.engine;
+        if (!engine) throw new Error('导演台画布尚未准备好');
+        if (useEditorStore.getState().busy || engine.exporting) throw new Error('导演台正在执行其他任务，请稍后重试');
+        const at = this.host.clock;
+        this.host.patch({ playing: false, busy: true });
+        engine.exporting = true;
+        try {
+            const { canvas, framing, seconds, cutHeight } = await this.planCanvas(input);
+            const round = (value: number) => Number(value.toFixed(2));
+            return {
+                dataUrl: canvas.toDataURL('image/jpeg', 0.9),
+                width: canvas.width,
+                height: canvas.height,
+                seconds,
+                plan: {
+                    area: {
+                        minX: round(framing.shown.minX), maxX: round(framing.shown.maxX),
+                        minZ: round(framing.shown.minZ), maxZ: round(framing.shown.maxZ),
+                    },
+                    metersPerPixel: Number(framing.metersPerPixel.toFixed(4)),
+                    gridStep: framing.gridStep,
+                    cutHeight,
+                    orientation: '上方为 −z（北），右方为 +x；橙线为人物路径（圆点是起点，箭头是终点），蓝点为机位',
+                },
+            };
+        } finally {
+            this.host.patch({ busy: false });
+            engine.restorePreview(at);
+        }
+    }
+
+    /** Everything that belongs to the set: built pieces, the room, routes and camera spots. Ground planes are left out. */
+    private setArea(notes: PlanAnnotations): PlanArea {
+        const engine = this.host.engine!;
+        const project = this.host.project;
+        const area = { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity };
+        const include = (x: number, z: number) => {
+            area.minX = Math.min(area.minX, x);
+            area.maxX = Math.max(area.maxX, x);
+            area.minZ = Math.min(area.minZ, z);
+            area.maxZ = Math.max(area.maxZ, z);
+        };
+        for (const entity of project.entities) {
+            // A ground plane is often scaled to tens of metres and would shrink the actual set to a speck.
+            if (!entity.visible || entity.kind === 'camera' || entity.light || entity.asset === 'ground') continue;
+            const bounds = engine.worldBounds(entity.id);
+            if (!bounds) continue;
+            include(bounds.min.x, bounds.min.z);
+            include(bounds.max.x, bounds.max.z);
+        }
+        if (project.room.enabled) {
+            include(-project.room.width / 2, -project.room.depth / 2);
+            include(project.room.width / 2, project.room.depth / 2);
+        }
+        for (const path of notes.paths) for (const [x, z] of path.points) include(x, z);
+        for (const camera of notes.cameras) include(camera.x, camera.z);
+        return Number.isFinite(area.minX) ? area : { minX: -5, maxX: 5, minZ: -5, maxZ: 5 };
+    }
+
+    /**
+     * Compare what the desk renders with a reference image, numerically.
+     *
+     * "布局和参考图差距有点大" cannot be answered from the scene JSON, and looking at two pictures only
+     * says "different". These numbers say how much of the silhouette overlaps, whether the
+     * proportions drifted, whether the colours belong to the same family, and which quarter of the
+     * picture is off. They are evidence, not acceptance: a plan view compared with a camera frame,
+     * or a grey build compared with a textured still, scores low on purpose.
+     */
+    async compareReference(input: {
+        referenceUrl?: string;
+        mode?: 'plan' | 'frame';
+        seconds?: number;
+        cameraId?: string;
+        size?: number;
+        cutHeight?: number;
+        area?: PlanArea;
+    }) {
+        const engine = this.host.engine;
+        if (!engine) throw new Error('导演台画布尚未准备好');
+        if (useEditorStore.getState().busy || engine.exporting) throw new Error('导演台正在执行其他任务，请稍后重试');
+        const referenceUrl = input.referenceUrl || getReferenceBackdrop()?.url || '';
+        if (!referenceUrl) throw new Error('没有可比的参考图：先让宿主接入一张参考图，或用 referenceUrl 传图片地址');
+        const mode = input.mode === 'frame' ? 'frame' : 'plan';
+        const size = input.size ?? 1024;
+        if (![640, 1024, 1536].includes(size)) throw new Error('size 只能是 640、1024 或 1536');
+        const reference = await this.readImage(referenceUrl);
+        const at = this.host.clock;
+        this.host.patch({ playing: false, busy: true });
+        engine.exporting = true;
+        try {
+            let rendered: Pixels;
+            let source: Record<string, unknown>;
+            if (mode === 'frame') {
+                const seconds = input.seconds ?? useEditorStore.getState().time;
+                if (!Number.isFinite(seconds) || seconds < 0 || seconds > this.host.project.duration) throw new Error('seconds 超出场景时长');
+                const [width, height] = outputSize(this.host.project.aspect, Math.min(size, 1280));
+                const cameraId = input.cameraId ?? useEditorStore.getState().preview;
+                await engine.prepareOutput(seconds);
+                rendered = this.contextPixels(engine.renderOutput(seconds, width, height, cameraId));
+                source = { mode, seconds, cameraId };
+            } else {
+                const plan = await this.planCanvas(input);
+                rendered = this.contextPixels(plan.canvas);
+                source = { mode, seconds: plan.seconds, cutHeight: plan.cutHeight };
+            }
+            const comparison = compareImages(rendered, reference);
+            return {
+                ...comparison,
+                source,
+                reference: { width: reference.width, height: reference.height },
+                render: { width: rendered.width, height: rendered.height },
+                note: '确定性指标只证明"哪里像、哪里不像"，不构成画面验收；剪影与直方图对材质、立体感和光影是盲的。看实际画面仍是最终判断。',
+            };
+        } finally {
+            this.host.patch({ busy: false });
+            engine.restorePreview(at);
+        }
+    }
+
+    private contextPixels(source: CanvasImageSource & { width: number; height: number }): Pixels {
+        const canvas = document.createElement('canvas');
+        canvas.width = source.width;
+        canvas.height = source.height;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        if (!context) throw new Error('无法创建比对画布');
+        context.drawImage(source, 0, 0);
+        return context.getImageData(0, 0, canvas.width, canvas.height);
+    }
+
+    /** Decode an image URL — a data URL from the host, or a blob URL for the attached reference. */
+    private readImage(url: string): Promise<Pixels> {
+        return new Promise((resolve, reject) => {
+            const image = new Image();
+            image.crossOrigin = 'anonymous';
+            image.onload = () => {
+                try {
+                    resolve(this.contextPixels(image));
+                } catch (error) {
+                    // A cross-origin picture loads but taints the canvas, so its pixels cannot be read.
+                    reject(new Error(`参考图无法读取像素（可能是跨域图片）：${(error as Error).message}`));
+                }
+            };
+            image.onerror = () => reject(new Error('参考图加载失败，请检查图片地址'));
+            image.src = url;
+        });
+    }
+
+    /** Plan canvas shared by `render_plan` and the plan-mode comparison. */
+    private async planCanvas(input: { cutHeight?: number; area?: PlanArea; seconds?: number; size?: number }) {
+        const engine = this.host.engine;
+        if (!engine) throw new Error('导演台画布尚未准备好');
+        const project = this.host.project;
+        if (!project.entities.some((entity) => entity.kind === 'camera')) throw new Error('场景里至少需要一个机位才能出图');
+        const cutHeight = input.cutHeight ?? 1.5;
+        if (!Number.isFinite(cutHeight) || cutHeight <= 0 || cutHeight > 50) throw new Error('cutHeight 需在 0—50 米之间');
+        const seconds = input.seconds ?? this.host.clock;
+        if (!Number.isFinite(seconds) || seconds < 0 || seconds > project.duration) throw new Error('seconds 超出场景时长');
+        const size = input.size ?? 1024;
+        if (![640, 1024, 1536].includes(size)) throw new Error('size 只能是 640、1024 或 1536');
+        if (input.area && ![input.area.minX, input.area.maxX, input.area.minZ, input.area.maxZ].every(Number.isFinite))
+            throw new Error('area 需要 minX、maxX、minZ、maxZ 四个有限数值（米）');
+        engine.sample(seconds);
+        const notes: PlanAnnotations = {
+            paths: project.entities
+                .filter((entity) => (entity.kind === 'actor' || entity.kind === 'crowd') && entity.visible && entity.path)
+                .map((entity) => ({ name: entity.name, points: entity.path!.points.map((point) => [point.position[0], point.position[2]] as [number, number]) })),
+            actors: project.entities
+                .filter((entity) => (entity.kind === 'actor' || entity.kind === 'crowd') && entity.visible)
+                .map((entity) => {
+                    const spot = entityPosition(entity, seconds);
+                    return { name: entity.name, x: spot.x, z: spot.z };
+                }),
+            cameras: project.entities
+                .filter((entity) => entity.kind === 'camera')
+                .map((entity) => {
+                    const position = engine.getShotCamera(entity.id).position;
+                    return { name: entity.name, x: position.x, z: position.z };
+                }),
+        };
+        const framing = planFraming(input.area ?? this.setArea(notes), size);
+        const frame = engine.renderPlan(seconds, framing, cutHeight);
+        const canvas = document.createElement('canvas');
+        canvas.width = framing.pixels.width;
+        canvas.height = framing.pixels.height;
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('无法创建平面图画布');
+        context.drawImage(frame, 0, 0, canvas.width, canvas.height);
+        drawPlanOverlay(context, framing, notes);
+        return { canvas, framing, seconds, cutHeight, notes };
+    }
+
+    /** Inspect the current sampled prop in neutral studio views without changing the project or viewport. */
+    inspectModel(input: { id?: string; views?: string[] }) {
+        const engine = this.host.engine;
+        if (!engine) throw new Error('导演台画布尚未准备好');
+        if (useEditorStore.getState().busy || engine.exporting) throw new Error('导演台正在执行其他任务，请稍后重试');
+        const id = input.id || useEditorStore.getState().selected;
+        const entity = this.host.project.entities.find(item => item.id === id);
+        if (!entity) throw new Error('请提供场景中真实存在的对象 ID，或先选中一个道具');
+        if (entity.kind !== 'prop') throw new Error('多视角模型核验目前支持建筑和道具；人物请使用场景预览');
+        const views = input.views ?? ['front', 'left', 'top', 'three_quarter'];
+        if (!Array.isArray(views) || views.length < 1 || views.length > 6 ||
+            views.some(view => !MODEL_INSPECTION_VIEWS.includes(view as ModelInspectionView))) {
+            throw new Error(`views 需要 1 至 6 个视角：${MODEL_INSPECTION_VIEWS.join('、')}`);
+        }
+        const root = engine.models.get(id);
+        if (!root) throw new Error('模型尚未加载到导演台场景');
+        this.host.patch({ busy: true });
+        try {
+            const inspected = inspectModel(root, views as ModelInspectionView[]);
+            const image = captureModelViews(inspected.model, inspected.box, views as ModelInspectionView[]);
+            const world = engine.worldBounds(id);
+            const { model: _model, box: _box, ...geometry } = inspected;
+            root.updateWorldMatrix(true, true);
+            const worldPosition = new THREE.Vector3();
+            const worldRotation = new THREE.Quaternion();
+            root.matrixWorld.decompose(worldPosition, worldRotation, new THREE.Vector3());
+            const worldFromScaledLocal = new THREE.Matrix4().compose(worldPosition, worldRotation, new THREE.Vector3(1, 1, 1));
+            let assetValidation: { ok: true } | { ok: false; error: string } | null = entity.external ? null : { ok: true };
+            if (!entity.external) {
+                try { validateAssetParameters(entity); }
+                catch (error) { assetValidation = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+            }
+            const source = entity.external
+                ? this.host.project.resources?.find(item => item.id === entity.external?.resourceId)
+                : undefined;
+            const sourceInspection = source ? engine.externalModels.inspection(source) : null;
+            return {
+                ...geometry,
+                parts: inspected.parts.map(part => ({
+                    ...part,
+                    worldCenter: new THREE.Vector3(...part.center).applyMatrix4(worldFromScaledLocal).toArray(),
+                })),
+                ...image,
+                entityId: id,
+                name: entity.name,
+                assetId: entity.asset,
+                visible: entity.visible,
+                timeSec: engine.time,
+                coordinates: 'bounds 和 parts 为对象朝向归零后的局部米制坐标，包含当前缩放；局部原点就是实体的 position（底面中心），所以 bounds.min.y=0 表示底面正好在 position 的高度，bounds.center 不是 position。parts.worldCenter 和 worldBounds 为场景世界坐标',
+                worldBounds: world ? {
+                    min: world.min.toArray(), max: world.max.toArray(),
+                    size: world.getSize(new THREE.Vector3()).toArray(),
+                } : null,
+                assetParameters: entity.external ? null : assetParameters(entity),
+                assetValidation,
+                sourceModel: sourceInspection ? {
+                    meshes: sourceInspection.meshes,
+                    triangles: sourceInspection.triangles,
+                    nodes: sourceInspection.nodes.length,
+                    warnings: sourceInspection.warnings,
+                } : null,
+                hint: '逐格查看正面、侧面、顶部等视角；参数与包围盒只证明几何事实，建筑组合、遮挡和视觉效果仍要用场景预览核验。',
+            };
+        } finally {
+            this.host.patch({ busy: false });
+        }
+    }
+
     /**
      * Export one shot as a still.
      *
@@ -157,7 +539,7 @@ export class SceneCommands {
             const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
             if (!blob) throw new Error('未能生成画面');
             const cameraName = this.host.project.entities.find((entity) => entity.id === span.cameraId)?.name ?? '';
-            download(blob, `${this.host.project.name}-镜头${span.index + 1}${cameraName ? '-' + cameraName : ''}.png`);
+            await deliverMedia(blob, `${this.host.project.name}-镜头${span.index + 1}${cameraName ? '-' + cameraName : ''}.png`, 'image', directorContext(this.host.project, at, at, span.cameraId));
             notifySuccess('已导出镜头画面');
         } catch (error) {
             notifyError((error as Error).message);
@@ -198,10 +580,22 @@ export class SceneCommands {
         });
     }
 
-    /** Frame the target with a standard shot size, then preview that camera. */
-    applyFraming(name: FramingName): boolean {
-        const camera = this.host.current();
-        if (camera?.kind !== 'camera' || !camera.camera) return false;
+    /**
+     * Frame the target with a standard shot size, then preview that camera.
+     *
+     * `cameraId` lets the host Agent name its target instead of relying on whatever happens to
+     * be selected; without it this acted on the selection and returned `false` when the
+     * selection was a prop, which read as "this preset does not work" rather than "you aimed it
+     * at the wrong object".
+     */
+    applyFraming(name: FramingName, cameraId?: string): boolean {
+        const camera = cameraId
+            ? this.host.project.entities.find((entity) => entity.id === cameraId)
+            : this.host.current();
+        if (!camera || camera.kind !== 'camera' || !camera.camera) {
+            if (cameraId) notifyError(`未找到机位：${cameraId}`);
+            return false;
+        }
         const project = this.host.project;
         const target =
             project.entities.find((entity) => entity.id === camera.camera!.targetId) ??
@@ -282,25 +676,66 @@ export class SceneCommands {
         });
     }
 
-    applyCameraPreset(id: CameraPresetId): boolean {
-        const camera = this.host.current();
+    /** Preset a camera move; `cameraId` names the target instead of trusting the selection. */
+    applyCameraPreset(id: CameraPresetId, cameraId?: string, options: { subjectId?: string; foregroundId?: string } = {}): boolean {
+        const camera = cameraId
+            ? this.host.project.entities.find((entity) => entity.id === cameraId)
+            : this.host.current();
         const engine = this.host.engine;
-        if (!camera?.camera || camera.locked || !engine) return false;
+        if (!camera?.camera || camera.locked || !engine) {
+            if (cameraId) notifyError(`未找到可用的机位：${cameraId}`);
+            return false;
+        }
         const from = this.host.clock;
         const duration = 4;
         const liveCamera = engine.getShotCamera(camera.id);
         const start = liveCamera.position.toArray() as Vec3;
-        const target = engine.targetPosition(camera).toArray() as Vec3;
+        const preset = CAMERA_PRESETS.find(p => p.id === id);
+        if (!preset || 'unavailable' in preset) {
+            notifyError(preset?.description ?? '未知运镜预设');
+            return false;
+        }
+        const entities = this.host.project.entities;
+        const subjectId = options.subjectId ?? camera.camera.targetId;
+        const subject = entities.find(e => e.id === subjectId && !e.camera)
+            ?? (!options.subjectId ? entities.find(e => e.kind === 'actor') : undefined);
+        const foreground = entities.find(e => e.id === options.foregroundId && !e.camera && e.visible && e.id !== subject?.id);
+        if ('subject' in preset && !subject) { notifyError('请先选择跟拍主体'); return false; }
+        if ('foreground' in preset && !foreground) { notifyError('请先选择前景遮挡物'); return false; }
+        const height = camera.camera.targetId === subject?.id ? camera.camera.targetHeight : (subject?.height ?? 1.7) * 0.65;
+        const subjectAt = subject ? (time: number) => entityPosition(subject, time).add(new THREE.Vector3(0, height, 0)).toArray() as Vec3 : undefined;
+        const currentTarget = engine.targetPosition(camera);
+        const target = 'subject' in preset && subjectAt ? subjectAt(from)
+            : liveCamera.position.clone().addScaledVector(liveCamera.getWorldDirection(new THREE.Vector3()),
+                Math.max(1, liveCamera.position.distanceTo(currentTarget))).toArray() as Vec3;
         const focal = liveCamera.getFocalLength();
-        const motion = cameraPresetPath(id, start, target, from, duration, focal);
+        const level = new THREE.PerspectiveCamera();
+        level.position.copy(liveCamera.position);
+        level.lookAt(level.position.clone().add(liveCamera.getWorldDirection(new THREE.Vector3())));
+        const roll = new THREE.Euler().setFromQuaternion(level.quaternion.invert().multiply(liveCamera.quaternion)).z * 180 / Math.PI;
+        const bounds = foreground ? engine.worldBounds(foreground.id) : null;
+        if ('foreground' in preset && !bounds) { notifyError('无法读取遮挡物的空间范围'); return false; }
+        const motion = cameraPresetPath(id, start, target, from, duration, focal, {
+            subjectAt: 'subject' in preset ? subjectAt : undefined,
+            subjectYaw: subject ? entityYaw(subject, from, this.host.project) : undefined,
+            foreground: bounds ? { center: bounds.getCenter(new THREE.Vector3()).toArray() as Vec3,
+                radius: bounds.getSize(new THREE.Vector3()).length() / 2 } : undefined,
+        });
         const applied = this.host.change(() => {
             camera.position = [...start];
             camera.path = motion.path;
+            delete camera.rotationAnimation;
+            if (Math.abs(roll) > 1e-6) camera.rotationAnimation = {
+                pivot: [0, 0, 0], keys: [
+                    { time: from, degrees: [0, 0, roll] },
+                    { time: from + duration, degrees: [0, 0, roll] },
+                ],
+            };
             camera.camera!.mode = 'free';
             camera.camera!.aim = 'target';
             camera.camera!.targetId = '';
             camera.camera!.target = [...target];
-            camera.camera!.targetPath = null;
+            camera.camera!.targetPath = motion.targetPath;
             camera.camera!.focal = focal;
             if (motion.focalKeys) camera.camera!.focalKeys = motion.focalKeys;
             else delete camera.camera!.focalKeys;
@@ -311,6 +746,64 @@ export class SceneCommands {
             this.host.patch({ preview: camera.id, inspectorTab: 'camera' });
         }
         return applied;
+    }
+
+    /**
+     * Apply a compiled campath: position keys, aim and focal keys in one undo step.
+     *
+     * *look target* is resolved here rather than in the compiler, because only the scene knows
+     * where a character is.
+     */
+    applyCampath(source: string, options: { cameraId?: string; atSec?: number } = {}) {
+        const engine = this.host.engine;
+        if (!engine) throw new Error('导演台画布尚未准备好');
+        const compiled = compileCampath(source);
+        const camera = options.cameraId
+            ? this.host.project.entities.find((entity) => entity.id === options.cameraId)
+            : this.host.current();
+        if (!camera || camera.kind !== 'camera' || !camera.camera)
+            throw new Error(options.cameraId ? `未找到机位：${options.cameraId}` : '请先选中一个机位，或用 cameraId 指定');
+        if (camera.locked) throw new Error(`「${camera.name}」已锁定`);
+        const start = options.atSec ?? this.host.clock;
+        if (!Number.isFinite(start) || start < 0) throw new Error('atSec 必须是非负秒数');
+        let lookTarget: Vec3 | null = null;
+        let targetId = '';
+        const look = compiled.look;
+        if (look.mode === 'target') {
+            const matches = this.host.project.entities.filter((entity) => entity.id === look.entityId || entity.id.startsWith(look.entityId));
+            if (!matches.length) throw new Error(`look target 的对象不存在：${look.entityId}`);
+            if (matches.length > 1) throw new Error(`look target 的「${look.entityId}」匹配到多个对象，请给出完整 ID`);
+            targetId = matches[0].id;
+            lookTarget = entityPosition(matches[0], start)
+                .add(new THREE.Vector3(0, camera.camera!.targetHeight, 0))
+                .toArray() as Vec3;
+        } else if (look.mode === 'at') {
+            lookTarget = look.point;
+        }
+        const warnings = [...compiled.warnings];
+        const applied = this.host.change(() => {
+            const config = camera.camera!;
+            camera.path = { smooth: true, points: compiled.points.map((point) => ({ time: start + point.time, position: point.position, easing: point.easing })) };
+            camera.position = [...compiled.points[0].position];
+            config.mode = 'free';
+            config.aim = compiled.look.mode === 'ahead' ? 'manual' : 'target';
+            config.targetId = targetId;
+            if (lookTarget) config.target = [...lookTarget];
+            config.targetPath = null;
+            if (compiled.focalKeys) {
+                config.focalKeys = compiled.focalKeys.map((key) => ({ time: start + key.time, value: key.value }));
+                config.focal = compiled.focalKeys[compiled.focalKeys.length - 1].value;
+            } else delete config.focalKeys;
+            this.host.project.duration = Math.max(this.host.project.duration, start + compiled.duration);
+        }, false);
+        if (!applied) throw new Error('campath 未提交：导演台正在执行其他任务');
+        engine.previewId = camera.id;
+        this.host.patch({ preview: camera.id, inspectorTab: 'camera' });
+        return {
+            entityId: camera.id, name: compiled.name, duration: compiled.duration,
+            keys: compiled.points.length, from: start, to: start + compiled.duration,
+            ...(warnings.length ? { warnings } : {}),
+        };
     }
 
     toggleGrid(): void {

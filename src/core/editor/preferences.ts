@@ -1,3 +1,4 @@
+import { CAPTURE_ASPECTS, type CaptureAspect } from './viewport-capture.ts';
 export const preferenceDefaults = {
     navigationSpeed: 3,
     navigationBoost: 3.333333,
@@ -11,6 +12,9 @@ export const preferenceDefaults = {
     placementSnap: 0,
     /** Snap to nearby object faces/boundaries while dragging a prop. */
     objectSnap: false,
+    surfaceDrop: false,
+    ambientOcclusion: false,
+    outline: false,
     /** `draft` halves the render resolution while navigating on weak machines. */
     previewQuality: 'full' as 'full' | 'draft',
     /** Framing guides drawn over the camera view. */
@@ -25,6 +29,8 @@ export const preferenceDefaults = {
     sidebarWidth: null as number | null,
     inspectorWidth: null as number | null,
     timelineHeight: null as number | null,
+    timelineVisible: false,
+    captureAspect: 'auto' as CaptureAspect,
 };
 export type EditorPreferences = typeof preferenceDefaults;
 export type PreferenceKey = keyof EditorPreferences;
@@ -36,7 +42,7 @@ export const preferenceRanges: Partial<Record<PreferenceKey, [number, number]>> 
     panSpeed: [0.1, 3],
     gizmoSize: [0.3, 2],
     placementSnap: [0, 1],
-    sidebarWidth: [200, 520],
+    sidebarWidth: [240, 520],
     inspectorWidth: [240, 560],
     timelineHeight: [140, 720],
 };
@@ -44,12 +50,15 @@ export const preferenceRanges: Partial<Record<PreferenceKey, [number, number]>> 
 const nullableKeys: ReadonlySet<PreferenceKey> = new Set(['sidebarWidth', 'inspectorWidth', 'timelineHeight']);
 /** Keys constrained to a closed set of strings. */
 const enumKeys: Partial<Record<PreferenceKey, readonly string[]>> = {
+    captureAspect: CAPTURE_ASPECTS,
     previewQuality: ['full', 'draft'],
     labelMode: ['off', 'selected', 'all'],
 };
 const storageKey = 'director-editor-preferences-v1';
 const values = { ...preferenceDefaults };
 const listeners = new Set<() => void>();
+// `values` is mutated in place, so subscribers need a changing snapshot to re-render.
+let version = 0;
 function valid(key: PreferenceKey, value: unknown) {
     if (nullableKeys.has(key) && value === null) return true;
     const allowed = enumKeys[key];
@@ -66,6 +75,7 @@ try {
     /* Missing or invalid local preferences retain defaults. */
 }
 function publish() {
+    version += 1;
     try {
         globalThis.localStorage?.setItem(storageKey, JSON.stringify(values));
     } catch {
@@ -76,6 +86,9 @@ function publish() {
 export const editorPreferences = {
     get current(): Readonly<EditorPreferences> {
         return values;
+    },
+    get version(): number {
+        return version;
     },
     set(key: PreferenceKey, value: unknown) {
         if (!Object.hasOwn(preferenceDefaults, key) || !valid(key, value)) return false;

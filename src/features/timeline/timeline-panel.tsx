@@ -1,5 +1,7 @@
 import {
     CaretRightOutlined,
+    LockOutlined,
+    UnlockOutlined,
     PauseOutlined,
     ScissorOutlined,
     StepBackwardOutlined,
@@ -8,10 +10,10 @@ import {
     MinusOutlined,
     PlusOutlined,
 } from '@ant-design/icons';
-import { Button, Popover, Slider, Switch, Tooltip } from 'antd';
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Button, Popover, Select, Slider, Switch, Tooltip } from 'antd';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { pathSections } from '@/core/clip-editing.ts';
-import { clipLabel, type Clip, type Entity } from '@/core/model.ts';
+import { clipLabel, FRAME_RATES, type Clip, type Entity } from '@/core/model.ts';
 import { timecode } from '@/shared/lib/format.ts';
 import { useTranslation } from '@/shared/i18n/use-translation.ts';
 import { NumberField } from '@/shared/ui/number-field.tsx';
@@ -42,14 +44,20 @@ const trackWidth = (viewport: number, zoom: number) =>
 export function TimelinePanel({
     onHeightChange,
     onHeightReset,
+    onNaturalHeight,
 }: {
     onHeightChange: (height: number) => void;
     onHeightReset: () => void;
+    onNaturalHeight?: (height: number) => void;
 }) {
     const t = useTranslation();
     const [zoom, setZoom] = useState(100);
     const bodyRef = useRef<HTMLDivElement>(null);
+    const transportRef = useRef<HTMLDivElement>(null);
+    const tracksRef = useRef<HTMLDivElement>(null);
+    const [bodyWidth, setBodyWidth] = useState(0);
     const pendingZoomAnchor = useRef<{ fraction: number; x: number } | null>(null);
+    const playheadGrabOffset = useRef(0);
     const resizing = useRef<{ y: number; height: number } | null>(null);
     const [cameraPickerOpen, setCameraPickerOpen] = useState(false);
     const project = useProject();
@@ -58,9 +66,11 @@ export function TimelinePanel({
     const loop = useEditorStore((state) => state.loop);
     const selected = useEditorStore((state) => state.selected);
     const selectedEntity = useSelectedEntity();
-    const tracks = project.entities.filter(
-        (entity) => entity.kind !== 'prop' || entity.path !== null || entity.clips.length > 0,
-    );
+    const [trackFilter, setTrackFilter] = useState('all');
+    const [collapsedGroups, setCollapsedGroups] = useState<string[]>([]);
+    const tracks = project.entities.filter(e => trackFilter === 'all' || (trackFilter === 'selected' ? e.id === selected || e.camera?.targetId === selected : Boolean(e.path || e.rotationAnimation || e.clips.length)));
+    const trackGroups = [{ id: 'actor', name: '角色' }, { id: 'camera', name: '机位' }, { id: 'light', name: '灯光' }, { id: 'prop', name: '道具' }];
+    const groupOf = (e: Entity) => e.kind === 'actor' || e.kind === 'crowd' ? 'actor' : e.kind === 'camera' ? 'camera' : e.light ? 'light' : 'prop';
     const extent = Math.max(
         project.duration,
         time,
@@ -68,10 +78,15 @@ export function TimelinePanel({
         ...tracks.flatMap((entity) => [
             ...entity.clips.map((clip) => clip.end),
             ...(entity.path ? pathSections(entity.path).map((section) => section.end) : []),
+            ...(entity.rotationAnimation ? entity.rotationAnimation.keys.map((key) => key.time) : []),
+            ...(entity.camera?.focalKeys?.map((key) => key.time) ?? []),
+            ...(entity.light && typeof entity.light.intensity !== 'number' ? entity.light.intensity.keys.map((key) => key.time) : []),
+            ...(entity.light?.colorKeys?.map((key) => key.time) ?? []),
         ]),
     );
     const percent = (seconds: number) => `${(seconds / extent) * 100}%`;
-    const ticks = rulerTicks(extent, zoom);
+    const laneWidth = Math.max(0, trackWidth(bodyWidth, zoom) - TRACK_LABEL_WIDTH);
+    const ticks = rulerTicks(extent, zoom, laneWidth);
     const cameraName = (id: string) => project.entities.find((entity) => entity.id === id)?.name ?? '';
     const cutSpans = project.cuts.map((cut, index) => ({
         ...cut,
@@ -88,7 +103,16 @@ export function TimelinePanel({
         const ruler = bodyRef.current?.querySelector('.lane--ruler');
         if (!ruler) return;
         const rect = ruler.getBoundingClientRect();
-        session.seek(Math.max(0, Math.min(extent, ((clientX - rect.left) / rect.width) * extent)));
+        session.seek(Math.max(0, Math.min(extent, ((clientX - playheadGrabOffset.current - rect.left) / rect.width) * extent)));
+    };
+
+    const seekAndReveal = (seconds: number) => {
+        session.seek(seconds);
+        const body = bodyRef.current;
+        if (!body) return;
+        const x = TRACK_LABEL_WIDTH + (seconds / extent) * (trackWidth(body.clientWidth, zoom) - TRACK_LABEL_WIDTH);
+        if (x < body.scrollLeft + TRACK_LABEL_WIDTH || x > body.scrollLeft + body.clientWidth - 14)
+            body.scrollLeft = x - TRACK_LABEL_WIDTH;
     };
 
     const zoomAt = (requested: number, pointerX?: number) => {
@@ -141,6 +165,25 @@ export function TimelinePanel({
         return () => body.removeEventListener('wheel', onWheel);
     }, [zoom, time, extent]);
 
+    // Ruler density follows the visible lane width, and the shell auto-fits the default
+    // panel height to the transport + tracks so two tracks no longer sit in 380px of air.
+    useEffect(() => {
+        const body = bodyRef.current;
+        const transport = transportRef.current;
+        const tracks = tracksRef.current;
+        if (!body || !transport || !tracks) return;
+        const measure = () => {
+            setBodyWidth(body.clientWidth);
+            onNaturalHeight?.(transport.offsetHeight + tracks.offsetHeight);
+        };
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(body);
+        observer.observe(transport);
+        observer.observe(tracks);
+        return () => observer.disconnect();
+    }, [onNaturalHeight]);
+
     const resizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
         if (event.button !== 0) return;
         const height = event.currentTarget.parentElement?.clientHeight ?? 260;
@@ -182,9 +225,12 @@ export function TimelinePanel({
                     }
                 }}
             />
-            <div className="timeline__transport">
+            <div className="timeline__transport" ref={transportRef}>
                 <div className="timeline__controls">
+                    <Select size="small" aria-label={t('轨道筛选')} value={trackFilter} onChange={setTrackFilter} options={[{ value: 'all', label: t('全部轨道') }, { value: 'selected', label: t('选中及关联机位') }, { value: 'animated', label: t('有动画') }]} />
                     <Button
+                        className="timeline__zoom-step"
+                        type="text"
                         aria-label={t('缩小时间轴')}
                         icon={<MinusOutlined />}
                         onClick={() => stepZoom(-1)}
@@ -218,6 +264,8 @@ export function TimelinePanel({
                         </Button>
                     </Popover>
                     <Button
+                        className="timeline__zoom-step"
+                        type="text"
                         aria-label={t('放大时间轴')}
                         icon={<PlusOutlined />}
                         onClick={() => stepZoom(1)}
@@ -229,7 +277,7 @@ export function TimelinePanel({
                             size="small"
                             icon={<VerticalRightOutlined />}
                             aria-label={t('回到开头')}
-                            onClick={() => session.seek(0)}
+                            onClick={() => seekAndReveal(0)}
                         />
                     </Tooltip>
                     <Tooltip title={t('上一帧')}>
@@ -294,6 +342,7 @@ export function TimelinePanel({
                             onOpenChange={setCameraPickerOpen}
                             content={
                                 <CameraPresetPicker
+                                    hasSubject={project.entities.some(entity => entity.kind === 'actor' || entity.id === selectedEntity.camera?.targetId)}
                                     onChoose={(id) => {
                                         if (session.applyCameraPreset(id)) setCameraPickerOpen(false);
                                     }}
@@ -320,6 +369,15 @@ export function TimelinePanel({
                             {t('角色动画')}
                         </Button>
                     ) : null}
+                    <Select
+                        className="timeline__fps"
+                        size="small"
+                        value={project.fps}
+                        aria-label={t('项目帧率')}
+                        onChange={(fps) => session.updateProjectSettings({ fps })}
+                        options={FRAME_RATES.map((value) => ({ value, label: `${value} fps` }))}
+                        popupMatchSelectWidth={96}
+                    />
                     <label className="duration-input">
                         {t('时长')}
                         <NumberField
@@ -332,19 +390,17 @@ export function TimelinePanel({
                         />
                         {t('秒')}
                     </label>
-                    <label className="inline">
-                        <Switch size="small" checked={loop} onChange={(checked) => session.setLoop(checked)} />
+                    <label className="timeline__loop">
+                        <Switch size="small" aria-label={t('循环')} checked={loop} onChange={(checked) => session.setLoop(checked)} />
                         {t('循环')}
                     </label>
-                    <span className="muted">
-                        {t('时间轴')} · {project.fps} fps
-                    </span>
                 </div>
             </div>
 
             <div className="timeline__body" ref={bodyRef}>
                 <div
                     className="timeline__tracks"
+                    ref={tracksRef}
                     style={{ width: `calc(${zoom}% + ${TRACK_LABEL_WIDTH * (1 - zoom / 100)}px)` }}
                 >
                     <div className="timeline__ruler-row">
@@ -415,54 +471,15 @@ export function TimelinePanel({
                         </div>
                     ) : null}
 
-                    {tracks.map((entity, index) => (
-                        <Fragment key={entity.id}>
-                            <div
-                                className="timeline__row"
-                                style={
-                                    {
-                                        '--track-accent': TRACK_COLORS[index % TRACK_COLORS.length],
-                                    } as React.CSSProperties
-                                }
-                            >
-                                <button
-                                    type="button"
-                                    className={`track-label track-label--button ${entity.id === selected ? 'is-selected' : ''}`}
-                                    onClick={() => session.selectEntity(entity.id)}
-                                >
-                                    <i
-                                        className="track-label__dot"
-                                        style={{
-                                            background:
-                                                entity.kind === 'camera'
-                                                    ? '#a1aab8'
-                                                    : TRACK_COLORS[index % TRACK_COLORS.length],
-                                        }}
-                                    />
-                                    <span title={entity.name}>{entity.name}</span>
-                                    <small>{entity.kind === 'camera' ? t('运镜') : t('动作')}</small>
-                                </button>
-                                <div className="lane" onPointerDown={seekFromPointer}>
-                                    <EntityLane entity={entity} extent={extent} fps={project.fps} />
-                                </div>
-                            </div>
-                            {entity.path ? (
-                                <div
-                                    className="timeline__row"
-                                    style={
-                                        {
-                                            '--track-accent': TRACK_COLORS[index % TRACK_COLORS.length],
-                                        } as React.CSSProperties
-                                    }
-                                >
-                                    <span className="track-label track-label--sub">{t('运动路径')}</span>
-                                    <div className="lane" onPointerDown={seekFromPointer}>
-                                        <PathLane entity={entity} extent={extent} fps={project.fps} />
-                                    </div>
-                                </div>
-                            ) : null}
-                        </Fragment>
-                    ))}
+                    {trackGroups.map(group => {
+                        const items = tracks.filter(e => groupOf(e) === group.id);
+                        if (!items.length) return null;
+                        const collapsed = collapsedGroups.includes(group.id);
+                        return <div key={group.id}>
+                            <button className="timeline__type-heading" aria-expanded={!collapsed} onClick={() => setCollapsedGroups(collapsed ? collapsedGroups.filter(id => id !== group.id) : [...collapsedGroups, group.id])}>{collapsed ? '▸' : '▾'} {t(group.name)} · {items.length}</button>
+                            {!collapsed && items.map((entity, index) => <EntityTracks key={entity.id} entity={entity} index={index} selected={entity.id === selected} extent={extent} fps={project.fps} onSeek={seekFromPointer} />)}
+                        </div>;
+                    })}
                     <div
                         className="timeline__playhead"
                         style={{
@@ -483,13 +500,15 @@ export function TimelinePanel({
                                     session.stepFrame(event.key === 'ArrowLeft' ? -1 : 1);
                                 } else if (event.key === 'Home' || event.key === 'End') {
                                     event.preventDefault();
-                                    session.seek(event.key === 'Home' ? 0 : project.duration);
+                                    seekAndReveal(event.key === 'Home' ? 0 : project.duration);
                                 }
                             }}
                             onPointerDown={(event) => {
+                                if (event.button !== 0) return;
                                 event.stopPropagation();
+                                const rect = event.currentTarget.parentElement!.getBoundingClientRect();
+                                playheadGrabOffset.current = event.clientX - rect.left;
                                 event.currentTarget.setPointerCapture(event.pointerId);
-                                scrubPlayhead(event.clientX);
                             }}
                             onPointerMove={(event) => {
                                 if (event.currentTarget.hasPointerCapture(event.pointerId))
@@ -511,9 +530,102 @@ export function TimelinePanel({
     );
 }
 
-/** Round ruler steps (1/2/5 × 10ⁿ) so labels stay readable at any duration. */
-function rulerTicks(extent: number, zoom: number): number[] {
-    const target = (10 * zoom) / 100;
+/** Object-first hierarchy; property rows retain the existing editing tools. */
+function EntityTracks({ entity, index, selected, extent, fps, onSeek }: {
+    entity: Entity; index: number; selected: boolean; extent: number; fps: number;
+    onSeek: (event: React.PointerEvent<HTMLDivElement>) => void;
+}) {
+    const t = useTranslation();
+    const [expanded, setExpanded] = useState<boolean | null>(null);
+    const [transformOpen, setTransformOpen] = useState(true);
+    const [parametersOpen, setParametersOpen] = useState(true);
+    const open = expanded ?? selected;
+    const actor = entity.kind === 'actor' || entity.kind === 'crowd';
+    const selectTab = (tab: 'base' | 'keys' | 'path' | 'actions' | 'light') => {
+        session.selectEntity(entity.id);
+        session.setInspectorTab(tab);
+    };
+    const vector = (values: number[]) => values.map(value => Number(value.toFixed(2))).join(' / ');
+    const row = (label: string, content: React.ReactNode, depth = 2, tab: 'base' | 'keys' | 'path' | 'actions' | 'light' = 'base') => (
+        <div className="timeline__row timeline__row--property" key={label}>
+            <button type="button" className="track-label track-label--button track-label--property"
+                style={{ paddingLeft: 16 + depth * 16 }} onClick={() => selectTab(tab)}>{label}</button>
+            <div className="lane" onPointerDown={onSeek}>{content}</div>
+        </div>
+    );
+    const value = (text: string, tab: 'base' | 'keys' | 'light' = 'base') => (
+        <button type="button" className="lane__property-value" onPointerDown={event => event.stopPropagation()}
+            onClick={() => selectTab(tab)}>{text}</button>
+    );
+    const group = (label: string, isOpen: boolean, toggle: () => void) => (
+        <div className="timeline__row timeline__row--group">
+            <button type="button" className="track-label track-label--button track-label--group"
+                aria-label={label} aria-expanded={isOpen} onClick={toggle}>
+                <CaretRightOutlined className={isOpen ? 'track-label__chevron is-open' : 'track-label__chevron'} />{label}
+            </button>
+            <div className="lane" onPointerDown={onSeek} />
+        </div>
+    );
+    const numberKeys = (keys: Array<{ time: number; value: number | string }>, tab: 'keys' | 'light' = 'keys') => keys.map((key, i) => (
+        <button type="button" key={`${key.time}-${i}`} className="lane__parameter-key"
+            style={{ left: `${key.time / extent * 100}%` }} title={`${key.time.toFixed(2)}s · ${key.value}`}
+            aria-label={`${t('关键帧')} ${key.time.toFixed(2)}s · ${key.value}`}
+            onPointerDown={event => event.stopPropagation()}
+            onClick={() => { selectTab(tab); session.seek(key.time); }} />
+    ));
+    return (
+        <div className={`timeline__object ${selected ? 'is-selected' : ''}`}
+            style={{ '--track-accent': TRACK_COLORS[index % TRACK_COLORS.length] } as React.CSSProperties}>
+            <div className="timeline__row timeline__row--object">
+                <div className={`track-label track-label--object ${selected ? 'is-selected' : ''}`}>
+                    <button type="button" className="track-label__expand" aria-label={`${t(open ? '折叠轨道' : '展开轨道')} · ${entity.name}`}
+                        aria-expanded={open} onClick={() => setExpanded(!open)}>
+                        <CaretRightOutlined className={open ? 'track-label__chevron is-open' : 'track-label__chevron'} />
+                    </button>
+                    <i className="track-label__dot" style={{ background: entity.color }} />
+                    <button type="button" className="track-label__name"
+                        title={`${entity.name} · ${entity.kind === 'camera' ? t('机位') : actor ? t('角色') : entity.light ? t('灯光') : t('道具')}`}
+                        onClick={() => session.selectEntity(entity.id)}>{entity.name}</button>
+                    <button type="button" className="track-label__lock" aria-label={`${t(entity.locked ? '解锁' : '锁定')} · ${entity.name}`}
+                        aria-pressed={entity.locked} onClick={() => {
+                            session.selectEntity(entity.id);
+                            session.setEntityFlag('locked', !entity.locked);
+                        }}>{entity.locked ? <LockOutlined /> : <UnlockOutlined />}</button>
+                </div>
+                <div className="lane lane--object" onPointerDown={onSeek} />
+            </div>
+            {open && <>
+                {group(t('变换'), transformOpen, () => setTransformOpen(!transformOpen))}
+                {transformOpen && <>
+                    {row(t('位置'), entity.path ? <PathLane entity={entity} extent={extent} fps={fps} /> : value(vector(entity.position)), 2, entity.path ? 'path' : 'base')}
+                    {row(t('旋转'), entity.rotationAnimation ? <RotationLane entity={entity} extent={extent} fps={fps} /> : value(`${vector(entity.rotation.map(angle => angle * 180 / Math.PI))}°`), 2, entity.rotationAnimation ? 'keys' : 'base')}
+                    {row(t('缩放'), value(vector(entity.scale)))}
+                </>}
+                {(actor || entity.clips.length > 0) && row(t('动作'), <EntityLane entity={entity} extent={extent} fps={fps} />, 1, 'actions')}
+                {entity.camera && <>
+                    {group(t('镜头参数'), parametersOpen, () => setParametersOpen(!parametersOpen))}
+                    {parametersOpen && row(t('焦距'), entity.camera.focalKeys?.length
+                        ? numberKeys(entity.camera.focalKeys) : value(`${entity.camera.focal} mm`, 'keys'), 2, 'keys')}
+                </>}
+                {entity.light && <>
+                    {group(t('灯光参数'), parametersOpen, () => setParametersOpen(!parametersOpen))}
+                    {parametersOpen && <>
+                        {row(t('强度'), typeof entity.light.intensity === 'number'
+                            ? value(String(entity.light.intensity), 'light') : numberKeys(entity.light.intensity.keys, 'light'), 2, 'light')}
+                        {row(t('颜色'), entity.light.colorKeys?.length ? numberKeys(entity.light.colorKeys.map(key => ({ time: key.time, value: key.color })), 'light') : value(entity.color, 'light'), 2, 'light')}
+                    </>}
+                </>}
+            </>}
+        </div>
+    );
+}
+
+/** Round ruler steps (1/2/5 × 10ⁿ) so labels stay readable at any duration and width. */
+function rulerTicks(extent: number, zoom: number, laneWidth: number): number[] {
+    // Zoom asks for ~10 ticks per screen, but a narrow lane can only legibly hold one
+    // label per ~64px; thin the ticks to whichever budget is smaller.
+    const widthTarget = laneWidth > 0 ? Math.max(2, Math.floor(laneWidth / 64)) : Infinity;
+    const target = Math.min((10 * zoom) / 100, widthTarget);
     const raw = extent / target;
     const magnitude = 10 ** Math.floor(Math.log10(Math.max(raw, 1e-6)));
     const step =
@@ -577,6 +689,56 @@ function PathLane({ entity, extent, fps }: { entity: Entity; extent: number; fps
     );
 }
 
+function RotationLane({ entity, extent, fps }: { entity: Entity; extent: number; fps: number }) {
+    const t = useTranslation();
+    const animation = entity.rotationAnimation;
+    if (!animation) return null;
+    const first = animation.keys[0];
+    const last = animation.keys[animation.keys.length - 1];
+    const showKey = (at: number) => {
+        session.selectEntity(entity.id);
+        session.seek(at);
+        session.setInspectorTab('keys');
+    };
+    return (
+        <div
+            className="clip clip--rotation"
+            style={{ left: `${(first.time / extent) * 100}%`, width: `${((last.time - first.time) / extent) * 100}%` }}
+            title={`${t('旋转')} · ${first.time.toFixed(2)}s → ${last.time.toFixed(2)}s`}
+            onPointerDown={(event) => {
+                event.stopPropagation();
+                session.selectEntity(entity.id);
+                beginClipDrag(event, { kind: 'rotation', entityId: entity.id }, {
+                    extent, fps, onTap: () => showKey(first.time),
+                });
+            }}
+        >
+            <span>{t('旋转')} · {first.time.toFixed(1)}–{last.time.toFixed(1)}s</span>
+            {animation.keys.map((key, index) => (
+                <button
+                    type="button"
+                    key={`${key.time}-${index}`}
+                    className="clip--rotation__key"
+                    style={{ left: `${((key.time - first.time) / (last.time - first.time)) * 100}%` }}
+                    title={`${key.time.toFixed(2)}s · ${key.degrees.join(', ')}°`}
+                    aria-label={`${key.time.toFixed(2)}s · ${key.degrees.join(', ')}°`}
+                    onPointerDown={(event) => {
+                        event.stopPropagation();
+                        session.selectEntity(entity.id);
+                        beginClipDrag(event, { kind: 'rotation', entityId: entity.id, keyIndex: index }, {
+                            extent, fps, onTap: () => showKey(key.time),
+                        });
+                    }}
+                    onClick={(event) => {
+                        if (event.detail !== 0) return;
+                        showKey(key.time);
+                    }}
+                />
+            ))}
+        </div>
+    );
+}
+
 function EntityLane({ entity, extent, fps }: { entity: Entity; extent: number; fps: number }) {
     const t = useTranslation();
     const selectedClipId = useEditorStore((state) => state.selectedClipId);
@@ -616,6 +778,9 @@ function EntityLane({ entity, extent, fps }: { entity: Entity; extent: number; f
                     <span>
                         {clipLabel(clip)} <small>{(clip.end - clip.start).toFixed(1)}s</small>
                     </span>
+                    {clip.start > 0 && <span className="clip__blend" style={{ width: `${Math.min(100, (clip.blendIn ?? entity.actionBlend ?? 0.2) / (clip.end - clip.start) * 100)}%`, minWidth: 24 }} onPointerDown={event => event.stopPropagation()}>
+                        <input type="range" aria-label={t('动作过渡 / 秒')} title={`${(clip.blendIn ?? entity.actionBlend ?? 0.2).toFixed(2)}s`} min={0} max={Math.min(2, clip.end - clip.start)} step={0.05} value={clip.blendIn ?? entity.actionBlend ?? 0.2} disabled={entity.locked} onChange={event => { session.selectEntity(entity.id); session.setClipField(clip.id, { blendIn: Number(event.target.value) }); }} />
+                    </span>}
                     <i className="clip__handle" data-resize="true" aria-hidden="true" />
                 </button>
             ))}

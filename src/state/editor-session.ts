@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { Engine } from '@/core/engine.ts';
 import { SceneWorkspace } from '@/core/scenes/scene-workspace.ts';
-import { assertProject, type CameraConfig, type Entity, type Joint, type Project, type Vec3 } from '@/core/model.ts';
+import { assertProject, clone, type CameraConfig, type Entity, type Joint, type Project, type Vec3 } from '@/core/model.ts';
 import { entityPosition, shiftPath } from '@/core/timeline.ts';
-import type { TimelineSelection } from '@/core/clip-editing.ts';
+import type { DraggableTimelineSelection } from '@/core/clip-editing.ts';
 import { selectedEntities, setSelectedEntities } from '@/core/editor/timeline-selection.ts';
 import { assertLockedEntitiesUnchanged } from '@/core/editor/invariants.ts';
 import { recordPositionKey } from '@/core/editor/position-keys.ts';
@@ -35,12 +35,16 @@ import { EntityCommands } from './commands/entity.ts';
 import { PathCommands } from './commands/path.ts';
 import { PoseCommands } from './commands/pose.ts';
 import { SceneCommands } from './commands/scene.ts';
+import type { CameraPlacementId } from '@/core/cinematography/camera-placements.ts';
 import type { CameraPresetId } from '@/core/cinematography/camera-presets.ts';
 import { setEditorTheme } from '@/core/editor/theme-state.ts';
 import { editorPreferences } from '@/core/editor/preferences.ts';
 import type { FramingName } from './commands/scene.ts';
 import { TimelineCommands } from './commands/timeline.ts';
 import type { EditorCommandHost } from './commands/host.ts';
+import { applyBatchEdits, type BatchEdit } from './batch-edits.ts';
+import { DirectorCommandError } from '@/core/errors.ts';
+import { checkUnsupported, toSpatialBox, type SpatialBox } from '@/core/spatial/checks.ts';
 
 /** How often the session republishes the playhead to React while playing (ms). */
 const UI_TIME_STEP = 50;
@@ -57,7 +61,11 @@ export class EditorSession {
     private lease: RenderLease | null = null;
     private transformError: Error | undefined;
     private cameraViewDragId: string | null = null;
+    /** True while a parameter slider holds one open history transaction for its whole drag. */
+    private continuousEdit = false;
     private clock = 0;
+    /** 最近一次整体导入失败的原因；host-bridge 把它随回执一起交给宿主。 */
+    lastSceneLoadError: DirectorCommandError | null = null;
     private lastUiSync = 0;
     private lastOverlaySync = 0;
     private lastOverlaySignature = '';
@@ -139,6 +147,7 @@ export class EditorSession {
      * read is in flight wins: recovery only applies when the revision is untouched.
      */
     async restoreRecovery(): Promise<void> {
+        if (window.parent !== window) return;
         if (this.recoveryStarted || !this.engineRef) return;
         this.recoveryStarted = true;
         const engine = this.engineRef;
@@ -188,6 +197,19 @@ export class EditorSession {
     get engine(): Engine {
         if (!this.engineRef) throw new Error('三维引擎尚未挂载');
         return this.engineRef;
+    }
+
+    entityBounds(id: string): { size: Vec3; min: Vec3; max: Vec3 } | null {
+        const box = this.engineRef?.localBounds(id);
+        const entity = this.project.entities.find((item) => item.id === id);
+        if (!box || !entity) return null;
+        const localSize = box.getSize(new THREE.Vector3()).toArray() as Vec3;
+        const rootScale = this.engineRef?.models.get(id)?.scale;
+        return {
+            size: localSize.map((value, axis) => value * (rootScale?.getComponent(axis) ?? 1)) as Vec3,
+            min: box.min.toArray() as Vec3,
+            max: box.max.toArray() as Vec3,
+        };
     }
 
     get engineOrNull(): Engine | null {
@@ -404,8 +426,27 @@ export class EditorSession {
     /* Transactions                                                        */
     /* ------------------------------------------------------------------ */
 
-    change(fn: () => void, rebuild = true): boolean {
+    change(fn: () => void, rebuild = true, throwOnError = false): boolean {
         if (useEditorStore.getState().busy) return false;
+        // A slider drag holds one open transaction: apply each step live and let
+        // endContinuousEdit commit a single undo entry for the whole gesture.
+        if (this.continuousEdit) {
+            try {
+                fn();
+                const engine = this.engineRef;
+                if (engine) {
+                    engine.project = this.project;
+                    engine.sample(this.clock);
+                    engine.refreshHelpers();
+                }
+                this.apply({ revision: useEditorStore.getState().revision + 1 });
+                return true;
+            } catch (error) {
+                notifyError((error as Error).message);
+                if (throwOnError) throw error;
+                return false;
+            }
+        }
         if (this.history.pending) {
             notifyError('请先完成或取消当前拖动操作');
             return false;
@@ -432,8 +473,130 @@ export class EditorSession {
             }
             this.changed(true);
             notifyError((error as Error).message);
+            if (throwOnError) throw error;
             return false;
         }
+    }
+
+    /** Open one history transaction for a parameter-slider drag; each step applies live. */
+    beginContinuousEdit(): boolean {
+        const state = useEditorStore.getState();
+        if (state.busy || state.pathDraft || this.history.pending || this.continuousEdit) return false;
+        this.apply({ playing: false });
+        this.history.begin(this.project);
+        this.continuousEdit = true;
+        return true;
+    }
+
+    /** Commit the drag as a single undoable change (or roll back if the result is invalid). */
+    endContinuousEdit(): void {
+        if (!this.continuousEdit) return;
+        this.continuousEdit = false;
+        try {
+            assertLockedEntitiesUnchanged(this.history.pending!, this.project);
+            assertProject(this.project);
+            this.engineRef?.externalModels.assertReady(this.project);
+            this.history.commit(this.project);
+            this.changed(false);
+        } catch (error) {
+            this.rollbackContinuousEdit();
+            notifyError((error as Error).message);
+        }
+    }
+
+    cancelContinuousEdit(): void {
+        if (!this.continuousEdit) return;
+        this.continuousEdit = false;
+        this.rollbackContinuousEdit();
+    }
+
+    private rollbackContinuousEdit(): void {
+        const restored = this.history.rollback();
+        if (restored) this.apply({ project: restored });
+        const selected = this.history.restoredSelection ?? useEditorStore.getState().selected;
+        this.apply({ selected });
+        if (this.engineRef) {
+            this.engineRef.selected = selected;
+            this.engineRef.rebuild(this.project);
+        }
+        this.changed(true);
+    }
+
+    /** Validate all edits against a copy, then commit them as one undoable project change. */
+    /**
+     * @param validateOnly 按提交时的规则预检、不写入。失败时指出首个问题，
+     * 调用方修正后可再次预检。
+     */
+    applyBatch(edits: BatchEdit[], expectedRevision: number, validateOnly = false) {
+        const revision = useEditorStore.getState().revision;
+        // 回报当前 revision 供调用方识别冲突；必须重新检查受影响实体后才能决定是否重试。
+        if (!Number.isInteger(expectedRevision) || expectedRevision !== revision)
+            throw new DirectorCommandError(`场景已变化：期望 revision=${expectedRevision}，当前 revision=${revision}`, {
+                code: 'REVISION_MISMATCH',
+                hint: '重新读取 snapshot，检查受影响实体与片段的当前值，再决定是否调整或重新提交；不要仅替换 expectedRevision 后原样重放',
+                facts: { currentRevision: revision, expectedRevision },
+            });
+        if (useEditorStore.getState().busy || this.history.pending)
+            throw new DirectorCommandError('批量修改未执行：导演台正在执行其他任务或有未完成的拖动', {
+                code: 'BUSY',
+                hint: '等待当前任务结束后重试；整批未写入',
+                facts: { currentRevision: revision },
+            });
+        const draft = clone(this.project);
+        const receipts = applyBatchEdits(draft, edits);
+        assertLockedEntitiesUnchanged(this.project, draft);
+        assertProject(draft);
+        this.engineRef?.externalModels.assertReady(draft);
+        if (validateOnly) {
+            return {
+                applied: false, valid: true, validatedOnly: true,
+                count: receipts.length, operations: receipts, revision,
+            };
+        }
+        let committedReceipts: ReturnType<typeof applyBatchEdits> = [];
+        const applied = this.change(() => { committedReceipts = applyBatchEdits(this.project, edits); }, true, true);
+        if (!applied) throw new DirectorCommandError('批量修改未提交：导演台正在执行其他任务或有未完成的拖动', {
+            code: 'BUSY',
+            hint: '等待当前任务结束后重试；整批未写入，无需回滚',
+            facts: { currentRevision: useEditorStore.getState().revision },
+        });
+        const warnings = this.groundingWarnings(committedReceipts.flatMap((receipt) => receipt.entityId ? [receipt.entityId] : []));
+        return {
+            applied: true, count: committedReceipts.length, operations: committedReceipts, revision: useEditorStore.getState().revision,
+            ...(warnings.length ? { warnings } : {}),
+        };
+    }
+
+    /**
+     * Standing props that ended up resting on nothing, measured on the live scene.
+     *
+     * Runs right after a commit, so a floating wall is reported in the same reply that placed it
+     * instead of being noticed frames later — or, as happened, by the user. `subjectIds` limits the
+     * report to what the caller just touched; omitted, every standing prop is judged.
+     */
+    groundingWarnings(subjectIds?: Iterable<string>): string[] {
+        const engine = this.engineRef;
+        if (!engine) return [];
+        const only = subjectIds ? new Set(subjectIds) : null;
+        const boxes: SpatialBox[] = [];
+        const standing = new Set<string>();
+        for (const entity of this.project.entities) {
+            if (!entity.visible || entity.kind === 'camera' || entity.light) continue;
+            const bounds = engine.worldBounds(entity.id);
+            if (!bounds) continue;
+            boxes.push(toSpatialBox(entity.id, entity.name, entity.kind, bounds, entity.kind === 'prop'));
+            if (entity.kind === 'prop' && !entity.path && !entity.handBinding && (!only || only.has(entity.id)))
+                standing.add(entity.id);
+        }
+        if (!standing.size) return [];
+        const floating = checkUnsupported(boxes, standing, this.clock).map((issue) => {
+            const entity = this.project.entities.find((item) => item.id === issue.ids[0])!;
+            return `${issue.message}（position.y=${Number(entity.position[1].toFixed(3))}）。素材原点在底面中心：要落地就把 position.y 设为 0，架在别的物体上就让底面贴住它的顶面；有意悬空（吊挂、飞行物）可忽略。`;
+        });
+        const shown = 12;
+        return floating.length > shown
+            ? [...floating.slice(0, shown), `另有 ${floating.length - shown} 个物体同样悬空，可用 spatial_check 查看完整列表。`]
+            : floating;
     }
 
     /** Re-publish editor state after a project mutation (or a rebuilt engine scene). */
@@ -466,7 +629,7 @@ export class EditorSession {
             engine.select(selected, engine.selectedPoint);
             engine.externalModels.retain([project, ...this.history.undoStack, ...this.history.redoStack]);
         }
-        this.autosave.request();
+        if (window.parent === window) this.autosave.request();
     }
 
     undo(): void {
@@ -532,6 +695,7 @@ export class EditorSession {
                 ...e.clips.map((c) => c.end),
                 ...(e.path?.sections?.map((s) => s.end) ?? e.path?.points.map((p) => p.time) ?? []),
                 ...e.poseKeys.map((k) => k.time),
+                ...(e.rotationAnimation?.keys.map((k) => k.time) ?? []),
                 ...(e.camera?.targetPath?.points.map((p) => p.time) ?? []),
             );
         }
@@ -635,7 +799,7 @@ export class EditorSession {
         return this.clips.timelineDragging;
     }
 
-    beginTimelineDrag(selection: TimelineSelection, resize: boolean): boolean {
+    beginTimelineDrag(selection: DraggableTimelineSelection, resize: boolean): boolean {
         return this.clips.beginTimelineDrag(selection, resize);
     }
 
@@ -667,7 +831,24 @@ export class EditorSession {
         this.clips.addAction(action);
     }
 
-    setClipField(id: string, patch: Partial<Pick<Entity['clips'][number], 'start' | 'end' | 'speed'>>): void {
+    /**
+     * 声明式写入一条运动路径。
+     *
+     * 编辑器里的 `start_path` → `add_path_point` → `finish_path` 依赖当前选区和播放头，
+     * 点时间会按默认时长重排，Agent 无法声明"这段路在 0—24 秒走完"；这条命令把
+     * 关键时点交给调用方，并通过同一套批量校验保证一次撤销。
+     */
+    setEntityPath(input: { entityId: string; points: { position: unknown; timeSec: unknown }[]; smooth?: boolean }) {
+        const revision = useEditorStore.getState().revision;
+        return this.applyBatch([{
+            operation: 'set_path',
+            entityId: input.entityId,
+            points: input.points,
+            ...(input.smooth === undefined ? {} : { smooth: input.smooth }),
+        }], revision);
+    }
+
+    setClipField(id: string, patch: Partial<Pick<Entity['clips'][number], 'start' | 'end' | 'speed' | 'blendIn'>>): void {
         this.clips.setClipField(id, patch);
     }
 
@@ -784,6 +965,26 @@ export class EditorSession {
         return this.entity.recordPositionKeyAtPlayhead();
     }
 
+    recordRotationKeyAtPlayhead(): boolean {
+        return this.entity.recordRotationKeyAtPlayhead();
+    }
+
+    setRotationKeyAxis(index: number, axis: 0 | 1 | 2, degrees: number): void {
+        this.entity.setRotationKeyAxis(index, axis, degrees);
+    }
+
+    setRotationPivotAxis(axis: 0 | 1 | 2, value: number): void {
+        this.entity.setRotationPivotAxis(axis, value);
+    }
+
+    removeRotationKey(index: number): void {
+        this.entity.removeRotationKey(index);
+    }
+
+    clearRotationAnimation(): void {
+        this.entity.clearRotationAnimation();
+    }
+
     /** Record the selected camera's focal length at the playhead. */
     recordFocalKeyAtPlayhead(): boolean {
         return this.scene.recordFocalKeyAtPlayhead();
@@ -798,7 +999,7 @@ export class EditorSession {
         this.path.holdPathPoint();
     }
 
-    addAsset(assetId: string): boolean {
+    addAsset(assetId: string) {
         return this.scene.addAsset(assetId);
     }
 
@@ -806,12 +1007,36 @@ export class EditorSession {
         this.scene.addCamera(fromView);
     }
 
-    snapshot(): Promise<void> {
-        return this.scene.snapshot();
+    addCameraPlacement(presetId: CameraPlacementId): boolean {
+        return this.scene.addCameraPlacement(presetId);
+    }
+
+    snapshot(size?: [number, number]): Promise<void> {
+        return this.scene.snapshot(size);
     }
 
     renderPreview(input: { seconds?: number; cameraId?: string; size?: number }) {
         return this.scene.renderPreview(input);
+    }
+
+    renderPreviewSheet(input: { timesSec: number[]; cameraId?: string }) {
+        return this.scene.renderPreviewSheet(input);
+    }
+
+    renderPlan(input: Parameters<SceneCommands['renderPlan']>[0]) {
+        return this.scene.renderPlan(input);
+    }
+
+    compareReference(input: Parameters<SceneCommands['compareReference']>[0]) {
+        return this.scene.compareReference(input);
+    }
+
+    applyCampath(source: string, options: Parameters<SceneCommands['applyCampath']>[1] = {}) {
+        return this.scene.applyCampath(source, options);
+    }
+
+    inspectModel(input: { id?: string; views?: string[] }) {
+        return this.scene.inspectModel(input);
     }
 
     exportShot(span: { index: number; cameraId: string; start: number; end: number }): Promise<void> {
@@ -870,8 +1095,8 @@ export class EditorSession {
         return this.scene.updateProjectSettings(patch);
     }
 
-    applyFraming(name: FramingName): boolean {
-        return this.scene.applyFraming(name);
+    applyFraming(name: FramingName, cameraId?: string): boolean {
+        return this.scene.applyFraming(name, cameraId);
     }
 
     updateRoom(patch: Partial<Project['room']>): boolean {
@@ -886,8 +1111,8 @@ export class EditorSession {
         this.scene.setCameraField(patch);
     }
 
-    applyCameraPreset(id: CameraPresetId): boolean {
-        return this.scene.applyCameraPreset(id);
+    applyCameraPreset(id: CameraPresetId, cameraId?: string, options: { subjectId?: string; foregroundId?: string } = {}): boolean {
+        return this.scene.applyCameraPreset(id, cameraId, options);
     }
 
     toggleGrid(): void {
@@ -1005,7 +1230,20 @@ export class EditorSession {
      */
     importSceneDocument(document: unknown, label = '载入外部场景'): boolean {
         const state = useEditorStore.getState();
-        if (state.busy || this.history.pending || state.pathDraft || this.engineRef?.exporting) return false;
+        // "不能现在载入"有四种完全不同的原因，把它们都说成 false 会让调用方盲重试：
+        // 之前有过因为路径草稿没结束，连续六次整体导入全部失败且没有任何线索。
+        const blocked = state.busy ? '导演台正在执行其他任务'
+            : this.history.pending ? '有未提交的拖动操作'
+            : state.pathDraft ? '正在绘制路径'
+            : this.engineRef?.exporting ? '正在导出' : '';
+        if (blocked) {
+            this.lastSceneLoadError = new DirectorCommandError(`无法载入场景：${blocked}`, {
+                hint: state.pathDraft ? '先在界面上取消正在绘制的路径（cancel_path），再重新导入'
+                    : '等待当前任务结束后重试；不要重复提交同一份文档',
+            });
+            notifyError(this.lastSceneLoadError.message);
+            return false;
+        }
         try {
             const project = this.history.reset(document);
             const selected = this.history.restoredSelection ?? project.entities[0]?.id ?? '';
@@ -1022,10 +1260,14 @@ export class EditorSession {
                 selectedJoint: '',
             });
             this.changed(true);
+            this.lastSceneLoadError = null;
             notifySuccess(`${label}：${project.name}`);
             return true;
         } catch (error) {
-            notifyError(`无法载入场景：${(error as Error).message}`);
+            this.lastSceneLoadError = new DirectorCommandError(`无法载入场景：${(error as Error).message}`, {
+                hint: '文档结构不合法；先用 export_scene 取当前工程的真实结构再对照修改',
+            });
+            notifyError(this.lastSceneLoadError.message);
             return false;
         }
     }
@@ -1087,6 +1329,10 @@ export class EditorSession {
 
     setScaleAxis(axis: 0 | 1 | 2, value: number): void {
         this.entity.setScaleAxis(axis, value);
+    }
+
+    setDimensionAxis(axis: 0 | 1 | 2, metres: number): void {
+        this.entity.setDimensionAxis(axis, metres);
     }
 
     setHeight(value: number): void {

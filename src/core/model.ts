@@ -74,11 +74,17 @@ export interface Clip {
     offset?: number;
     progressOffset?: number;
     sourceDuration?: number;
+    blendIn?: number;
     turnAmount?: number;
 }
 export interface PoseKey {
     time: number;
     pose: Pose;
+}
+/** Local pivot and additive Euler rotation, sampled independently of the entity's position path. */
+export interface RotationAnimation {
+    pivot: Vec3;
+    keys: { time: number; degrees: Vec3; easing?: Easing }[];
 }
 export interface CameraConfig {
     targetPath?: CameraLookPath | null;
@@ -94,6 +100,17 @@ export interface CameraConfig {
     hideWalls: string[];
     hiddenEntityIds?: string[];
 }
+/** 组合体的一个部件：一个形状素材 + 在组合体内的相对位置、尺寸、朝向与颜色。 */
+export interface PropPart {
+    /** 形状素材 id，必须是 shape-* 家族。 */
+    shape: string;
+    /** 相对组合体基座的位置（米）。 */
+    at: Vec3;
+    /** 部件的实际尺寸（米），省略按 1×1×1。 */
+    size?: Vec3;
+    rotationDegrees?: Vec3;
+    color?: string;
+}
 export interface Entity {
     memberPaths?: MotionPath[] | null;
     light?: LightConfig;
@@ -108,6 +125,7 @@ export interface Entity {
     color: string;
     position: Vec3;
     rotation: Vec3;
+    rotationAnimation?: RotationAnimation;
     scale: Vec3;
     visible: boolean;
     locked: boolean;
@@ -127,6 +145,8 @@ export interface Entity {
     reference: string;
     parameters?: Partial<PropParameters>;
     assetParameters?: Record<string, number>;
+    /** 声明式组合体：用基本体拼出目录里没有的物体（篝火、吉他、特定家具）。 */
+    parts?: PropPart[];
     actionBlend?: number;
     footContact?: boolean;
 }
@@ -392,7 +412,7 @@ export function assertProject(input: unknown): asserts input is Project {
         if (
             e.kind === 'camera'
                 ? e.asset !== 'camera'
-                : e.asset !== 'external-model' && findAsset(e.asset)?.kind !== e.kind
+                : !['external-model', 'composite'].includes(e.asset) && findAsset(e.asset)?.kind !== e.kind
         )
             fail('白模资产不存在或类型不匹配');
         if (e.kind !== 'camera' && e.camera !== null) fail('非摄影机对象不应包含摄影机配置');
@@ -405,6 +425,17 @@ export function assertProject(input: unknown): asserts input is Project {
         )
             fail('对象名称或颜色错误');
         if (!v3(e.position) || !v3(e.rotation) || !v3(e.scale) || e.scale.some((x) => x <= 0)) fail('对象坐标错误');
+        if (e.rotationAnimation !== undefined) {
+            const animation = e.rotationAnimation;
+            if (!animation || !v3(animation.pivot) || !Array.isArray(animation.keys) || animation.keys.length < 2)
+                fail('旋转动画需要局部轴心和至少两个关键帧');
+            animation.keys.forEach((key, index) => {
+                if (!key || !n(key.time) || key.time < 0 || !v3(key.degrees) ||
+                    (index > 0 && key.time <= animation.keys[index - 1].time))
+                    fail('旋转关键帧需要递增时间和三个角度');
+                assertEasing(key.easing);
+            });
+        }
         if (
             typeof e.visible !== 'boolean' ||
             typeof e.locked !== 'boolean' ||
@@ -496,9 +527,25 @@ export function assertProject(input: unknown): asserts input is Project {
         assertInitialPose(e.initialPose);
         if (e.kind === 'camera' && e.initialPose) fail('摄影机使用位置与朝向继承，不使用模型姿态');
         validateAssetParameters(e);
+        if (e.parts !== undefined) {
+            if (!Array.isArray(e.parts) || e.parts.length < 1 || e.parts.length > 32)
+                fail('组合体需要 1 至 32 个部件');
+            e.parts.forEach((part, index) => {
+                const label = `组合体第 ${index + 1} 个部件`;
+                if (!part || typeof part !== 'object' || Array.isArray(part)) fail(`${label}格式错误`);
+                if (typeof part.shape !== 'string' || findAsset(part.shape)?.family !== 'shape-v1')
+                    fail(`${label}的形状必须是形状素材（shape-*）`);
+                if (!v3(part.at)) fail(`${label}的位置需要三个有限数值`);
+                if (part.size !== undefined && (!v3(part.size) || part.size.some((x) => x <= 0)))
+                    fail(`${label}的尺寸需要三个正数`);
+                if (part.rotationDegrees !== undefined && !v3(part.rotationDegrees)) fail(`${label}的旋转需要三个有限数值`);
+                if (part.color !== undefined && !/^#[0-9a-f]{6}$/i.test(String(part.color))) fail(`${label}的颜色格式错误`);
+            });
+        }
         assertContactAnchors(e);
         assertHandBinding(e, p);
         if (e.footContact !== undefined && typeof e.footContact !== 'boolean') fail('脚底贴合设置错误');
+        for (const c of e.clips) if (c.blendIn !== undefined && (!n(c.blendIn) || c.blendIn < 0 || c.blendIn > 2)) throw Error('动作过渡时长无效');
         if (e.actionBlend !== undefined && (!n(e.actionBlend) || e.actionBlend < 0 || e.actionBlend > 2))
             fail('动作过渡时长错误');
         if (e.path) {

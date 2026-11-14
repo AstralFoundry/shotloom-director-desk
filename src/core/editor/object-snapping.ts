@@ -1,4 +1,4 @@
-import { Box3, Matrix4, Mesh, Object3D, Vector3 } from 'three';
+import { Box3, Matrix4, Mesh, Object3D, Raycaster, Vector3 } from 'three';
 import { modelNodeHidden } from '../resources/model-node-visibility.ts';
 
 export interface SnapBounds {
@@ -13,8 +13,23 @@ export interface ObjectSnap {
     normal: Vector3;
 }
 
-/** Keep each object's orientation instead of snapping against an enlarged world AABB. */
-export function objectBounds(root: Object3D, id: string, name: string): SnapBounds | null {
+/** Allow a one-metre lift while dragging, then drop onto the first horizontal mesh face. */
+export function surfaceDropPosition(root: Object3D, position: [number, number, number], targets: Object3D[]): [number, number, number] | null {
+    root.updateWorldMatrix(true, true);
+    const bounds = new Box3().setFromObject(root);
+    if (bounds.isEmpty()) return null;
+    const offset = new Vector3(...position).sub(root.getWorldPosition(new Vector3()));
+    const ray = new Raycaster(new Vector3(position[0], bounds.max.y + offset.y + 1, position[2]), new Vector3(0, -1, 0));
+    for (const target of targets) target.updateWorldMatrix(true, true);
+    const hit = ray.intersectObjects(targets, true).find(hit => {
+        for (let node: Object3D | null = hit.object; node; node = node.parent) if (!node.visible) return false;
+        return !modelNodeHidden(hit.object) && hit.face && hit.face.normal.clone().transformDirection(hit.object.matrixWorld).y > 0.98;
+    });
+    return hit ? [position[0], position[1] + hit.point.y - (bounds.min.y + offset.y), position[2]] : null;
+}
+
+/** Axis-aligned bounds in the object's own coordinates, before its root transform. */
+export function localObjectBounds(root: Object3D): Box3 | null {
     root.updateWorldMatrix(true, true);
     const inverse = root.matrixWorld.clone().invert(),
         local = new Box3();
@@ -28,7 +43,13 @@ export function objectBounds(root: Object3D, id: string, name: string): SnapBoun
                     .applyMatrix4(new Matrix4().multiplyMatrices(inverse, node.matrixWorld)),
             );
     });
-    if (local.isEmpty()) return null;
+    return local.isEmpty() ? null : local;
+}
+
+/** Keep each object's orientation instead of snapping against an enlarged world AABB. */
+export function objectBounds(root: Object3D, id: string, name: string): SnapBounds | null {
+    const local = localObjectBounds(root);
+    if (!local) return null;
     const corners: Vector3[] = [];
     for (const x of [local.min.x, local.max.x])
         for (const y of [local.min.y, local.max.y])

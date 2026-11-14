@@ -8,6 +8,7 @@ import { session } from '@/state/editor-session.ts';
 import { useEditorStore } from '@/state/editor-store.ts';
 import { App } from './App.tsx';
 import { initializeEditorTheme } from '@/core/editor/theme-state.ts';
+import { initializeHostBridge } from './host-bridge.ts';
 
 initializeEditorTheme();
 
@@ -24,3 +25,4 @@ createRoot(container).render(
         <App />
     </StrictMode>,
 );
+initializeHostBridge();

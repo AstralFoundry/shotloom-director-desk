@@ -14,13 +14,7 @@ export function ResetProjectDialog({ open, onClose }: { open: boolean; onClose: 
             footer={
                 <>
                     <Button onClick={onClose}>{t('取消')}</Button>
-                    <Button
-                        type="primary"
-                        danger
-                        onClick={() => {
-                            if (session.resetProject()) onClose();
-                        }}
-                    >
+                    <Button type="primary" danger onClick={() => { if (session.resetProject()) onClose(); }}>
                         {t('重置项目')}
                     </Button>
                 </>

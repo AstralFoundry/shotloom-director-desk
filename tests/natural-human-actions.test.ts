@@ -7,6 +7,7 @@ import { sampleHumanAction, sampleHumanBody } from '../src/core/assets/human-ani
 import { motionPreset } from '../src/core/animation/motion-catalog.ts';
 import { disposeTree } from '../src/core/assets/dispose.ts';
 import { sliceAction } from '../src/core/clip-editing.ts';
+import { fitFeetToSurface } from '../src/core/editor/foot-contact.ts';
 
 test('standing, walking, running and support-leg gestures keep feet above the actor floor across proportions', () => {
     for (const asset of ['person', 'human-adult', 'human-female', 'human-dwarf', 'human-giant']) {
@@ -17,6 +18,8 @@ test('standing, walking, running and support-leg gestures keep feet above the ac
                 e.clips = [clip(action, 0, 3)];
                 for (let i = 0; i < 60; i++) {
                     sampleHumanAction(r, e, i / 20);
+                    // The engine grounds the sampled pose against the scene surface.
+                    fitFeetToSurface(r, () => 0);
                     r.root.updateMatrixWorld(true);
                     for (const side of ['left', 'right']) {
                         const foot = r.joints[side + 'Ankle'];

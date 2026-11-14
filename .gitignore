@@ -32,6 +32,12 @@ release/
 /scripts/*
 !/scripts/check-release-privacy.mjs
 !/scripts/smoke.mjs
+!/scripts/screenshots.mjs
+!/scripts/demo-scene.mjs
+!/scripts/demo-video.mjs
+!/scripts/smoke-depth.mjs
+!/scripts/smoke-timeline.mjs
+!/scripts/generate-theme-css.mjs
 !/scripts/test-assets.mjs
 !/scripts/test-asset-sources.json
 
